@@ -9,6 +9,7 @@
 terraform.tfvars
 .terraform.lock.hcl
 crash.log
-
+*.lambda_deployment/
+lambda_deployment/
 # Large files that exceeded GitHub limits
 aws_iot_s3/.terraform/providers/registry.terraform.io/hashicorp/aws/5.95.0/darwin_arm64/terraform-provider-aws_v5.95.0_x5
