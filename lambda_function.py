@@ -1,7 +1,6 @@
 import json
 import boto3
 import math
-import gzip
 import time
 import logging
 
@@ -12,110 +11,84 @@ logger.setLevel(logging.INFO)
 iot = boto3.client('iot-data', region_name='ap-northeast-1')
 s3 = boto3.client('s3')
 
-# IDM parameters (tuned for platooning)
-DESIRED_DISTANCE = 5.0  # meters (reduced for closer following)
-MAX_ACCELERATION = 1.5   # m/s² (increased for more responsive following)
-DESIRED_SPEED = 15.0     # m/s (~54 km/h)
-FOLLOW_SPEED = 12.0      # m/s
-TIME_HEADWAY = 1.0       # seconds (reduced for tighter following)
-COMFORT_DECEL = 2.5      # m/s² (increased for more responsive braking)
+# Control parameters
+DESIRED_DISTANCE = 5.0  # meters
+MAX_SPEED = 15.0       # m/s
+MIN_SPEED = 0.0        # m/s
+STEERING_GAIN = 0.5    # Steering sensitivity
 
-# State holder (reset every function call)
-previous_lat = None
-previous_lon = None
-previous_time = None
-last_control_time = None
-
-def latlon_to_meters(lat1, lon1, lat2, lon2):
-    # Rough conversion using Haversine formula
-    R = 6371000  # radius of Earth in meters
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-def calculate_idm_acceleration(velocity, distance, leader_velocity=0):
-    """Calculate acceleration using Intelligent Driver Model"""
-    # Calculate desired distance
-    desired_distance = DESIRED_DISTANCE + velocity * TIME_HEADWAY
-    
-    # Calculate acceleration
-    if distance > 0:
-        acceleration = MAX_ACCELERATION * (
-            1 - (velocity / DESIRED_SPEED)**4 - 
-            (desired_distance / distance)**2
-        )
-    else:
-        acceleration = -MAX_ACCELERATION  # Emergency braking if too close
-    
-    return acceleration
+def calculate_control(leader_data):
+    try:
+        # Extract leader vehicle data
+        leader_speed = leader_data['velocity']['speed']
+        leader_control = leader_data['control']
+        
+        # Calculate target speed based on leader's speed
+        target_speed = min(leader_speed, MAX_SPEED)
+        
+        # Calculate throttle based on target speed
+        if target_speed > 0:
+            throttle = min(1.0, target_speed / MAX_SPEED)
+        else:
+            throttle = 0.0
+            
+        # Use leader's steering as base, with some smoothing
+        steer = leader_control['steer'] * STEERING_GAIN
+        
+        # Calculate brake based on speed difference
+        brake = 0.0
+        if leader_speed < MIN_SPEED:
+            brake = 1.0
+            
+        # Prepare control message
+        control_message = {
+            "throttle": throttle,
+            "steer": steer,
+            "brake": brake,
+            "timestamp": time.time()
+        }
+        
+        logger.info(f"Calculated control: {control_message}")
+        return control_message
+        
+    except Exception as e:
+        logger.error(f"Error calculating control: {e}")
+        # Return safe default values
+        return {
+            "throttle": 0.0,
+            "steer": 0.0,
+            "brake": 1.0,
+            "timestamp": time.time()
+        }
 
 def lambda_handler(event, context):
-    global previous_lat, previous_lon, previous_time, last_control_time
-    
     try:
         logger.info("Lambda function triggered")
         logger.info(f"Event: {json.dumps(event)}")
 
-        # === 1. Get the uploaded file info ===
+        # Get the uploaded file info
         record = event['Records'][0]
         bucket = record['s3']['bucket']['name']
         key = record['s3']['object']['key']
         logger.info(f"Processing S3 object: {bucket}/{key}")
 
-        # === 2. Download and parse JSON ===
+        # Download and parse JSON
         response = s3.get_object(Bucket=bucket, Key=key)
-        gps_data = json.loads(response['Body'].read().decode('utf-8'))
-        logger.info(f"GPS data: {json.dumps(gps_data)}")
+        vehicle_data = json.loads(response['Body'].read().decode('utf-8'))
+        logger.info(f"Vehicle data: {json.dumps(vehicle_data)}")
 
-        lat = gps_data["latitude"]
-        lon = gps_data["longitude"]
-        timestamp = gps_data["timestamp"]
-
-        # Calculate velocity
-        velocity = 0.0
-        if previous_lat is not None:
-            dist = latlon_to_meters(previous_lat, previous_lon, lat, lon)
-            dt = timestamp - previous_time
-            if dt > 0:
-                velocity = dist / dt
-            logger.info(f"Calculated velocity: {velocity} m/s")
-
-        # Save for next invocation
-        previous_lat = lat
-        previous_lon = lon
-        previous_time = timestamp
-
-        # === 3. IDM-based control ===
-        # Calculate acceleration using IDM
-        acceleration = calculate_idm_acceleration(velocity, DESIRED_DISTANCE)
-        logger.info(f"Calculated acceleration: {acceleration} m/s²")
+        # Calculate control values
+        control_message = calculate_control(vehicle_data)
         
-        # Convert acceleration to control values
-        throttle = min(max(acceleration / MAX_ACCELERATION, 0.0), 1.0)
-        brake = 0.0 if acceleration > 0 else min(abs(acceleration) / COMFORT_DECEL, 1.0)
-        logger.info(f"Control values - throttle: {throttle}, brake: {brake}")
-
-        # === 4. Publish to MQTT ===
-        message = {
-            "throttle": throttle,
-            "steer": 0.0,  # No steering for now
-            "brake": brake,
-            "timestamp": timestamp
-        }
-
+        # Publish control message
         topic = "carla/control/vehicle2"
         logger.info(f"Publishing to topic: {topic}")
-        logger.info(f"Message payload: {json.dumps(message)}")
+        logger.info(f"Control message: {json.dumps(control_message)}")
         
         response = iot.publish(
             topic=topic,
             qos=1,
-            payload=json.dumps(message)
+            payload=json.dumps(control_message)
         )
         
         logger.info(f"Publish response: {response}")

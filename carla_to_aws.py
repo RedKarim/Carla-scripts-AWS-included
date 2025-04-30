@@ -10,6 +10,7 @@ import numpy as np
 from pygame.locals import K_w, K_s, K_a, K_d, K_q, K_ESCAPE
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
+import math
 
 # ========== ENV + MQTT SETUP ==========
 load_dotenv()
@@ -20,29 +21,53 @@ CERT_PATH = os.getenv("AWS_CERT_PATH")
 KEY_PATH = os.getenv("AWS_KEY_PATH")
 
 def on_connect(client, userdata, flags, rc):
+    print(f"Connected with result code {rc}")
     if rc == 0:
-        print("Connected to AWS IoT successfully!")
-        # Subscribe to the control topic with QoS 1
+        print("Successfully connected to AWS IoT")
+        # Subscribe to the control topic
         client.subscribe("carla/control/vehicle2", qos=1)
         print("Subscribed to topic: carla/control/vehicle2")
     else:
-        print(f"Failed to connect to AWS IoT with return code {rc}")
+        print(f"Failed to connect to AWS IoT with result code {rc}")
 
 def on_subscribe(client, userdata, mid, granted_qos):
-    print(f"Successfully subscribed to topic with QoS: {granted_qos}")
+    print(f"Successfully subscribed to topic with message ID {mid}")
+    print(f"Granted QoS levels: {granted_qos}")
+
+def on_message(client, userdata, msg):
+    print(f"Received message on topic: {msg.topic}")
+    print(f"Message payload: {msg.payload.decode()}")
+    try:
+        control_data = json.loads(msg.payload.decode())
+        print(f"Parsed control data: {control_data}")
+        follow_control.throttle = float(control_data.get("throttle", 0.0))
+        follow_control.steer = float(control_data.get("steer", 0.0))
+        follow_control.brake = float(control_data.get("brake", 0.0))
+        print(f"Applied control values - throttle: {follow_control.throttle}, steer: {follow_control.steer}, brake: {follow_control.brake}")
+    except Exception as e:
+        print(f"Error processing message: {e}")
 
 def on_disconnect(client, userdata, rc):
-    print(f"Disconnected from AWS IoT with return code {rc}")
+    print(f"Disconnected from AWS IoT with result code {rc}")
     if rc != 0:
-        print("Attempting to reconnect...")
+        print("Unexpected disconnection. Attempting to reconnect...")
         client.reconnect()
 
+# MQTT listener for Car 2 control
+follow_control = carla.VehicleControl()
+
+# Set up MQTT client
 mqtt_client = mqtt.Client(client_id=CLIENT_ID)
 mqtt_client.on_connect = on_connect
 mqtt_client.on_subscribe = on_subscribe
 mqtt_client.on_message = on_message
 mqtt_client.on_disconnect = on_disconnect
+
+# Configure TLS
 mqtt_client.tls_set(ca_certs=CA_PATH, certfile=CERT_PATH, keyfile=KEY_PATH, tls_version=ssl.PROTOCOL_TLSv1_2)
+
+# Connect to AWS IoT
+print("Connecting to AWS IoT...")
 mqtt_client.connect(AWS_ENDPOINT, 8883, 60)
 mqtt_client.loop_start()
 
@@ -112,35 +137,60 @@ def gps_callback(event):
     now = time.time()
     if now - last_sent_time >= GPS_UPDATE_INTERVAL:
         try:
-            gps = {
+            # Get vehicle velocity
+            velocity = lead_vehicle.get_velocity()
+            speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)  # m/s
+            
+            # Get vehicle transform
+            transform = lead_vehicle.get_transform()
+            location = transform.location
+            rotation = transform.rotation
+            
+            # Get vehicle control state
+            control = lead_vehicle.get_control()
+            
+            # Prepare data package
+            data = {
                 "latitude": event.latitude,
                 "longitude": event.longitude,
-                "timestamp": now
+                "altitude": event.altitude,
+                "timestamp": now,
+                "velocity": {
+                    "x": velocity.x,
+                    "y": velocity.y,
+                    "z": velocity.z,
+                    "speed": speed
+                },
+                "transform": {
+                    "location": {
+                        "x": location.x,
+                        "y": location.y,
+                        "z": location.z
+                    },
+                    "rotation": {
+                        "pitch": rotation.pitch,
+                        "yaw": rotation.yaw,
+                        "roll": rotation.roll
+                    }
+                },
+                "control": {
+                    "throttle": control.throttle,
+                    "steer": control.steer,
+                    "brake": control.brake,
+                    "hand_brake": control.hand_brake,
+                    "reverse": control.reverse,
+                    "manual_gear_shift": control.manual_gear_shift,
+                    "gear": control.gear
+                }
             }
-            mqtt_client.publish("carla/gps", json.dumps(gps), qos=1)
-            print(f"Sent GPS to AWS: {gps}")
+            
+            mqtt_client.publish("carla/gps", json.dumps(data), qos=1)
+            print(f"Sent vehicle data to AWS: {json.dumps(data)}")
             last_sent_time = now
         except Exception as e:
-            print(f"Error publishing GPS data: {e}")
+            print(f"Error publishing vehicle data: {e}")
 
 gnss.listen(lambda event: gps_callback(event))
-
-# MQTT listener for Car 2 control
-follow_control = carla.VehicleControl()
-
-def on_message(client, userdata, msg):
-    try:
-        print(f"Received message on topic: {msg.topic}")
-        print(f"Message payload: {msg.payload.decode()}")
-        data = json.loads(msg.payload.decode())
-        follow_control.throttle = data.get("throttle", 0.0)
-        follow_control.steer = data.get("steer", 0.0)
-        follow_control.brake = data.get("brake", 0.0)
-        print(f"Applied control values - throttle: {follow_control.throttle}, steer: {follow_control.steer}, brake: {follow_control.brake}")
-    except json.JSONDecodeError as e:
-        print(f"Failed to parse JSON: {e}")
-    except Exception as e:
-        print(f"Error processing control message: {e}")
 
 # Main loop
 clock = pygame.time.Clock()
