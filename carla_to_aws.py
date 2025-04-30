@@ -40,12 +40,61 @@ def on_message(client, userdata, msg):
     try:
         control_data = json.loads(msg.payload.decode())
         print(f"Parsed control data: {control_data}")
-        follow_control.throttle = float(control_data.get("throttle", 0.0))
-        follow_control.steer = float(control_data.get("steer", 0.0))
-        follow_control.brake = float(control_data.get("brake", 0.0))
+        
+        # Apply control values with validation and smoothing
+        target_throttle = max(0.0, min(1.0, float(control_data.get("throttle", 0.0))))
+        target_steer = max(-1.0, min(1.0, float(control_data.get("steer", 0.0))))
+        target_brake = max(0.0, min(1.0, float(control_data.get("brake", 0.0))))
+        
+        # Smooth transitions with reduced smoothing factor for more responsive control
+        follow_control.throttle = follow_control.throttle + (target_throttle - follow_control.throttle) * 0.7
+        follow_control.steer = follow_control.steer + (target_steer - follow_control.steer) * 0.5
+        follow_control.brake = follow_control.brake + (target_brake - follow_control.brake) * 0.7
+        
+        # Update vehicle state in IoT shadow
+        try:
+            velocity = follow_vehicle.get_velocity()
+            speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
+            transform = follow_vehicle.get_transform()
+            
+            state_update = {
+                "state": {
+                    "reported": {
+                        "location": {
+                            "x": transform.location.x,
+                            "y": transform.location.y,
+                            "z": transform.location.z
+                        },
+                        "rotation": {
+                            "yaw": transform.rotation.yaw,
+                            "pitch": transform.rotation.pitch,
+                            "roll": transform.rotation.roll
+                        },
+                        "velocity": {
+                            "x": velocity.x,
+                            "y": velocity.y,
+                            "z": velocity.z,
+                            "speed": speed
+                        }
+                    }
+                }
+            }
+            
+            mqtt_client.publish(
+                "$aws/things/vehicle2/shadow/update",
+                json.dumps(state_update),
+                qos=1
+            )
+        except Exception as e:
+            print(f"Error updating vehicle state: {e}")
+        
         print(f"Applied control values - throttle: {follow_control.throttle}, steer: {follow_control.steer}, brake: {follow_control.brake}")
     except Exception as e:
         print(f"Error processing message: {e}")
+        # Reset to safe values on error
+        follow_control.throttle = 0.0
+        follow_control.steer = 0.0
+        follow_control.brake = 1.0
 
 def on_disconnect(client, userdata, rc):
     print(f"Disconnected from AWS IoT with result code {rc}")
@@ -95,11 +144,11 @@ lead_spawn = spawn_points[0]
 lead_vehicle = world.spawn_actor(vehicle_bp, lead_spawn)
 print("Spawned lead vehicle")
 
-# Spawn Car 2 (10 meters behind Car 1)
+# Spawn Car 2 (15 meters behind Car 1)
 follow_spawn = carla.Transform(
     carla.Location(
-        x=lead_spawn.location.x - 10 * lead_spawn.get_forward_vector().x,
-        y=lead_spawn.location.y - 10 * lead_spawn.get_forward_vector().y,
+        x=lead_spawn.location.x - 15 * math.cos(math.radians(lead_spawn.rotation.yaw)),
+        y=lead_spawn.location.y - 15 * math.sin(math.radians(lead_spawn.rotation.yaw)),
         z=lead_spawn.location.z
     ),
     lead_spawn.rotation
@@ -197,15 +246,48 @@ clock = pygame.time.Clock()
 running = True
 lead_control = carla.VehicleControl()
 
+# Control state variables for smooth acceleration
+current_throttle = 0.0
+current_brake = 0.0
+current_steer = 0.0
+THROTTLE_INCREMENT = 0.05  # Reduced for smoother acceleration
+BRAKE_INCREMENT = 0.1
+STEER_INCREMENT = 0.05  # Reduced for smoother steering
+
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key in [K_ESCAPE, K_q]):
             running = False
 
     keys = pygame.key.get_pressed()
-    lead_control.throttle = 1.0 if keys[K_w] else 0.0
-    lead_control.steer = -1.0 if keys[K_a] else 1.0 if keys[K_d] else 0.0
-    lead_control.brake = 1.0 if keys[K_s] else 0.0
+    
+    # Smooth throttle control
+    if keys[K_w]:
+        current_throttle = min(current_throttle + THROTTLE_INCREMENT, 0.7)  # Max 70% throttle
+        current_brake = 0.0
+    elif keys[K_s]:
+        current_brake = min(current_brake + BRAKE_INCREMENT, 1.0)
+        current_throttle = 0.0
+    else:
+        current_throttle = max(current_throttle - THROTTLE_INCREMENT, 0.0)
+        current_brake = max(current_brake - BRAKE_INCREMENT, 0.0)
+    
+    # Smooth steering control
+    if keys[K_a]:
+        current_steer = max(current_steer - STEER_INCREMENT, -0.7)  # Smooth left turn, max 70% left
+    elif keys[K_d]:
+        current_steer = min(current_steer + STEER_INCREMENT, 0.7)   # Smooth right turn, max 70% right
+    else:
+        # Return steering to center
+        if current_steer > 0:
+            current_steer = max(current_steer - STEER_INCREMENT, 0.0)
+        else:
+            current_steer = min(current_steer + STEER_INCREMENT, 0.0)
+    
+    # Apply lead vehicle control
+    lead_control.throttle = current_throttle
+    lead_control.brake = current_brake
+    lead_control.steer = current_steer
     lead_vehicle.apply_control(lead_control)
 
     # Apply control to following vehicle
