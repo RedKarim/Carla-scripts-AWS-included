@@ -41,6 +41,12 @@ def on_message(client, userdata, msg):
         control_data = json.loads(msg.payload.decode())
         print(f"Parsed control data: {control_data}")
         
+        # Extract and log latency information
+        if 'timestamp' in control_data:
+            aws_receive_time = time.time()
+            latency = aws_receive_time - control_data['timestamp']
+            print(f"Latency from AWS to CARLA: {latency*1000:.2f} ms")
+        
         # Apply control values with validation and smoothing
         target_throttle = max(0.0, min(1.0, float(control_data.get("throttle", 0.0))))
         target_steer = max(-1.0, min(1.0, float(control_data.get("steer", 0.0))))
@@ -198,12 +204,12 @@ def gps_callback(event):
             # Get vehicle control state
             control = lead_vehicle.get_control()
             
-            # Prepare data package
+            # Prepare data package with timestamp
             data = {
                 "latitude": event.latitude,
                 "longitude": event.longitude,
                 "altitude": event.altitude,
-                "timestamp": now,
+                "timestamp": now,  # Add timestamp for latency measurement
                 "velocity": {
                     "x": velocity.x,
                     "y": velocity.y,
@@ -233,7 +239,11 @@ def gps_callback(event):
                 }
             }
             
+            # Log send time for latency measurement
+            send_time = time.time()
             mqtt_client.publish("carla/gps", json.dumps(data), qos=1)
+            publish_latency = (time.time() - send_time) * 1000
+            print(f"Publish latency: {publish_latency:.2f} ms")
             print(f"Sent vehicle data to AWS: {json.dumps(data)}")
             last_sent_time = now
         except Exception as e:
