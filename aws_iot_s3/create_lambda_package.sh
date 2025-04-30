@@ -7,7 +7,7 @@ mkdir -p lambda_package
 cp ../lambda_function.py lambda_package/
 
 # Install required dependencies
-pip install boto3 -t lambda_package/
+pip3 install boto3 -t lambda_package/
 
 # Create the zip file
 cd lambda_package
