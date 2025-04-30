@@ -40,6 +40,14 @@ def calculate_control_commands(lead_data, follow_data):
         current_distance = calculate_distance(lead_location['x'], lead_location['y'], 
                                            follow_location['x'], follow_location['y'])
         
+        # If lead vehicle is stationary (speed < 0.1 m/s), stop the follower
+        if lead_speed < 0.1:
+            return {
+                'throttle': 0.0,
+                'steer': 0.0,
+                'brake': 1.0
+            }
+        
         # Calculate relative angle to lead vehicle
         dx = lead_location['x'] - follow_location['x']
         dy = lead_location['y'] - follow_location['y']
@@ -52,14 +60,14 @@ def calculate_control_commands(lead_data, follow_data):
         while angle_diff < -math.pi: angle_diff += 2 * math.pi
         
         # Improved PID-like steering control with deadband
-        steer_deadband = 0.1  # Deadband for small angle differences
+        steer_deadband = 0.05  # Reduced deadband for better tracking
         if abs(angle_diff) < steer_deadband:
             steer = 0.0
         else:
-            # Reduced proportional gain and added derivative term
-            kp_steer = 0.3  # Reduced from 0.7
-            kd_steer = 0.1  # Derivative gain for damping
-            steer = kp_steer * angle_diff
+            # Adjusted gains for better steering response
+            kp_steer = 0.4  # Increased from 0.3
+            kd_steer = 0.15  # Increased from 0.1
+            steer = kp_steer * angle_diff + kd_steer * (angle_diff - angle_diff)  # Simple derivative term
         
         # Clamp steering
         steer = max(-1.0, min(1.0, steer))
@@ -69,14 +77,14 @@ def calculate_control_commands(lead_data, follow_data):
         speed_diff = lead_speed - follow_speed
         
         # PID gains for longitudinal control
-        kp_dist = 0.05  # Reduced from 0.1
-        ki_dist = 0.01  # Integral gain
-        kd_dist = 0.02  # Derivative gain
-        kp_speed = 0.1  # Reduced from 0.2
+        kp_dist = 0.08  # Increased from 0.05
+        ki_dist = 0.005  # Reduced from 0.01
+        kd_dist = 0.03  # Increased from 0.02
+        kp_speed = 0.15  # Increased from 0.1
         
         # Calculate longitudinal control with deadband
-        longitudinal_deadband = 0.5  # Deadband for small distance errors
-        if abs(distance_error) < longitudinal_deadband and abs(speed_diff) < 0.5:
+        longitudinal_deadband = 0.3  # Reduced from 0.5 for more responsive control
+        if abs(distance_error) < longitudinal_deadband and abs(speed_diff) < 0.3:
             longitudinal_control = 0.0
         else:
             longitudinal_control = (kp_dist * distance_error + 
@@ -92,13 +100,18 @@ def calculate_control_commands(lead_data, follow_data):
             throttle = 0.0
             brake = min(1.0, -longitudinal_control)
             
-        # Safety checks
-        if current_distance < desired_distance * 0.5:  # Emergency braking if too close
+        # Enhanced safety checks
+        if current_distance < desired_distance * 0.7:  # Increased from 0.5 for earlier braking
             throttle = 0.0
             brake = 1.0
         
         if follow_speed > max_speed:  # Speed limiting
             throttle = 0.0
+            
+        # Additional safety: if too far behind, increase throttle
+        if current_distance > desired_distance * 1.5:
+            throttle = min(1.0, throttle + 0.2)
+            brake = 0.0
             
         # Log all relevant values
         logger.info(f"Lead speed: {lead_speed}, Follow speed: {follow_speed}")
