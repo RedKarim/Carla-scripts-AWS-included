@@ -28,10 +28,10 @@ def calculate_control_commands(lead_data, follow_data):
         comfort_decel = float(os.environ.get('COMFORT_DECEL', '2.0'))
         
         # Extract data from both vehicles
-        lead_location = lead_data['location']
+        lead_location = lead_data['transform']['location']
         follow_location = follow_data['location']
-        lead_speed = lead_data['speed']
-        follow_speed = follow_data['speed']
+        lead_speed = lead_data['velocity']['speed']
+        follow_speed = follow_data.get('velocity', {}).get('speed', 0.0)
         
         # Calculate current distance between vehicles
         current_distance = calculate_distance(lead_location['x'], lead_location['y'], follow_location['x'], follow_location['y'])
@@ -46,9 +46,9 @@ def calculate_control_commands(lead_data, follow_data):
         distance_error = current_distance - desired_distance
         
         # Log all relevant values
-        print(f"Lead speed: {lead_speed}, Follow speed: {follow_speed}")
-        print(f"Current distance: {current_distance}, Desired distance: {desired_distance}")
-        print(f"Speed difference: {speed_diff}, Distance error: {distance_error}")
+        logger.info(f"Lead speed: {lead_speed}, Follow speed: {follow_speed}")
+        logger.info(f"Current distance: {current_distance}, Desired distance: {desired_distance}")
+        logger.info(f"Speed difference: {speed_diff}, Distance error: {distance_error}")
         
         # Calculate throttle based on speed difference and distance error
         # Make the control less conservative by reducing the thresholds
@@ -70,7 +70,7 @@ def calculate_control_commands(lead_data, follow_data):
         steer = math.sin(angle) * 0.5  # Increase steering sensitivity
         
         # Log the final control commands
-        print(f"Calculated commands - Throttle: {throttle}, Steer: {steer}, Brake: {brake}")
+        logger.info(f"Calculated commands - Throttle: {throttle}, Steer: {steer}, Brake: {brake}")
         
         return {
             'throttle': throttle,
@@ -78,7 +78,7 @@ def calculate_control_commands(lead_data, follow_data):
             'brake': brake
         }
     except Exception as e:
-        print(f"Error calculating control commands: {str(e)}")
+        logger.error(f"Error calculating control commands: {str(e)}")
         return {
             'throttle': 0.0,
             'steer': 0.0,
