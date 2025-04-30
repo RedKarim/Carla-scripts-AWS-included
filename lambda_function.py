@@ -17,120 +17,109 @@ def calculate_distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
 
 def calculate_control_commands(lead_data, follow_data):
-    """Calculate control commands for the following vehicle using improved PID-like control."""
+    """Calculate control commands using the Intelligent Driver Model (IDM) for car following."""
     try:
-        # Get configuration from environment variables
-        desired_distance = float(os.environ.get('DESIRED_DISTANCE', '10.0'))
-        max_acceleration = float(os.environ.get('MAX_ACCELERATION', '3.0'))
-        max_speed = float(os.environ.get('MAX_SPEED', '30.0'))
+        # IDM Parameters - tuned for better response
+        desired_speed = float(os.environ.get('MAX_SPEED', '15.0'))  # Reduced to 15 m/s for better control
+        safe_time_headway = 1.5  # Increased for more safety margin
+        max_acceleration = float(os.environ.get('MAX_ACCELERATION', '1.5'))  # Reduced for smoother acceleration
+        comfortable_deceleration = 2.0  # m/s^2
+        minimum_spacing = 7.0  # Increased minimum spacing
+        delta = 4.0  # acceleration exponent
         
-        # Extract data from both vehicles
+        # Extract and validate vehicle data
+        if not all(key in lead_data.get('transform', {}) for key in ['location', 'rotation']):
+            logger.error("Invalid lead vehicle transform data")
+            return {'throttle': 0.0, 'steer': 0.0, 'brake': 1.0}
+            
+        if not all(key in follow_data for key in ['location', 'rotation', 'velocity']):
+            logger.error("Invalid follow vehicle data")
+            return {'throttle': 0.0, 'steer': 0.0, 'brake': 1.0}
+        
         lead_location = lead_data['transform']['location']
         follow_location = follow_data['location']
         lead_speed = lead_data['velocity']['speed']
-        follow_speed = follow_data.get('velocity', {}).get('speed', 0.0)
+        follow_speed = follow_data['velocity']['speed']
         
         # Get vehicle headings
         lead_rotation = lead_data['transform']['rotation']
-        follow_rotation = follow_data.get('rotation', {'yaw': 0.0})
+        follow_rotation = follow_data['rotation']
         lead_yaw = math.radians(lead_rotation.get('yaw', 0.0))
         follow_yaw = math.radians(follow_rotation.get('yaw', 0.0))
         
-        # Calculate current distance between vehicles
+        # Calculate current distance
         current_distance = calculate_distance(lead_location['x'], lead_location['y'], 
                                            follow_location['x'], follow_location['y'])
         
-        # If lead vehicle is stationary (speed < 0.1 m/s), stop the follower
-        if lead_speed < 0.1:
+        # Log state
+        logger.info(f"Lead speed: {lead_speed}, Follow speed: {follow_speed}")
+        logger.info(f"Current distance: {current_distance}")
+        
+        # Initialize control commands
+        throttle = 0.0
+        brake = 0.0
+        steer = 0.0
+        
+        # If vehicles are too close, emergency brake
+        if current_distance < minimum_spacing:
+            logger.info("Emergency brake - too close")
             return {
                 'throttle': 0.0,
                 'steer': 0.0,
                 'brake': 1.0
             }
         
-        # Calculate relative angle to lead vehicle
+        # Calculate desired minimum gap using IDM
+        desired_minimum_gap = minimum_spacing + (follow_speed * safe_time_headway) + \
+            ((follow_speed * (follow_speed - lead_speed)) / 
+             (2 * math.sqrt(max_acceleration * comfortable_deceleration)))
+        
+        # Calculate IDM acceleration with smoother response
+        free_road_term = 1 - (follow_speed / desired_speed)**delta
+        interaction_term = (desired_minimum_gap / current_distance)**2
+        
+        acceleration = max_acceleration * (free_road_term - interaction_term)
+        
+        # Convert acceleration to throttle/brake commands with smoother transitions
+        if acceleration > 0:
+            throttle = min(acceleration / max_acceleration, 0.6)  # Reduced max throttle
+            brake = 0.0
+        else:
+            throttle = 0.0
+            brake = min(-acceleration / comfortable_deceleration, 0.8)  # Reduced max brake
+        
+        # Calculate steering with improved stability
         dx = lead_location['x'] - follow_location['x']
         dy = lead_location['y'] - follow_location['y']
         angle_to_lead = math.atan2(dy, dx)
         
         # Calculate steering based on relative angle and current heading
-        # Normalize the angle difference to [-pi, pi]
         angle_diff = angle_to_lead - follow_yaw
         while angle_diff > math.pi: angle_diff -= 2 * math.pi
         while angle_diff < -math.pi: angle_diff += 2 * math.pi
         
-        # Improved PID-like steering control with deadband
-        steer_deadband = 0.05  # Reduced deadband for better tracking
-        if abs(angle_diff) < steer_deadband:
-            steer = 0.0
-        else:
-            # Adjusted gains for better steering response
-            kp_steer = 0.4  # Increased from 0.3
-            kd_steer = 0.15  # Increased from 0.1
-            steer = kp_steer * angle_diff + kd_steer * (angle_diff - angle_diff)  # Simple derivative term
+        # Proportional steering control with reduced gain
+        kp_steer = 0.2  # Reduced for smoother steering
+        steer = kp_steer * angle_diff
+        steer = max(-0.5, min(0.5, steer))  # Reduced max steering angle
         
-        # Clamp steering
-        steer = max(-1.0, min(1.0, steer))
-        
-        # Distance and speed control with improved PID
-        distance_error = current_distance - desired_distance
-        speed_diff = lead_speed - follow_speed
-        
-        # PID gains for longitudinal control
-        kp_dist = 0.08  # Increased from 0.05
-        ki_dist = 0.005  # Reduced from 0.01
-        kd_dist = 0.03  # Increased from 0.02
-        kp_speed = 0.15  # Increased from 0.1
-        
-        # Calculate longitudinal control with deadband
-        longitudinal_deadband = 0.3  # Reduced from 0.5 for more responsive control
-        if abs(distance_error) < longitudinal_deadband and abs(speed_diff) < 0.3:
-            longitudinal_control = 0.0
-        else:
-            longitudinal_control = (kp_dist * distance_error + 
-                                 ki_dist * distance_error +  # Simple integral term
-                                 kd_dist * speed_diff +      # Derivative term
-                                 kp_speed * speed_diff)
-        
-        # Calculate throttle and brake with smoother transitions
-        if longitudinal_control > 0:
-            throttle = min(1.0, longitudinal_control)
-            brake = 0.0
-        else:
-            throttle = 0.0
-            brake = min(1.0, -longitudinal_control)
-            
-        # Enhanced safety checks
-        if current_distance < desired_distance * 0.7:  # Increased from 0.5 for earlier braking
-            throttle = 0.0
-            brake = 1.0
-        
-        if follow_speed > max_speed:  # Speed limiting
-            throttle = 0.0
-            
-        # Additional safety: if too far behind, increase throttle
-        if current_distance > desired_distance * 1.5:
-            throttle = min(1.0, throttle + 0.2)
-            brake = 0.0
-            
-        # Log all relevant values
-        logger.info(f"Lead speed: {lead_speed}, Follow speed: {follow_speed}")
-        logger.info(f"Current distance: {current_distance}, Desired distance: {desired_distance}")
-        logger.info(f"Angle diff: {math.degrees(angle_diff)}, Steer: {steer}")
-        logger.info(f"Distance error: {distance_error}, Speed diff: {speed_diff}")
-        logger.info(f"Calculated commands - Throttle: {throttle}, Steer: {steer}, Brake: {brake}")
+        # Log control values
+        logger.info(f"IDM acceleration: {acceleration}")
+        logger.info(f"Desired gap: {desired_minimum_gap}, Current gap: {current_distance}")
+        logger.info(f"Control commands - Throttle: {throttle}, Steer: {steer}, Brake: {brake}")
         
         return {
             'throttle': float(throttle),
             'steer': float(steer),
             'brake': float(brake)
         }
+        
     except Exception as e:
         logger.error(f"Error calculating control commands: {str(e)}")
         return {
             'throttle': 0.0,
             'steer': 0.0,
-            'brake': 1.0  # Default to brake when there's an error
+            'brake': 1.0
         }
 
 def lambda_handler(event, context):
@@ -150,8 +139,17 @@ def lambda_handler(event, context):
         
         try:
             response = s3.get_object(Bucket=bucket, Key=key)
-            gps_data = json.loads(response['Body'].read().decode('utf-8'))
-            logger.info(f"GPS data: {json.dumps(gps_data)}")
+            lead_data = json.loads(response['Body'].read().decode('utf-8'))
+            logger.info(f"Lead vehicle data: {json.dumps(lead_data)}")
+            
+            # Validate lead vehicle data
+            if not all(key in lead_data for key in ['transform', 'velocity']):
+                logger.error("Invalid lead vehicle data format")
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps('Invalid lead vehicle data format')
+                }
+            
         except s3.exceptions.NoSuchKey:
             logger.error(f"File not found in S3: {key}")
             return {
@@ -171,8 +169,26 @@ def lambda_handler(event, context):
             shadow_response = iot.get_thing_shadow(
                 thingName='vehicle2'
             )
-            follow_data = json.loads(shadow_response['payload'].read().decode('utf-8'))['state']['reported']
+            shadow_data = json.loads(shadow_response['payload'].read().decode('utf-8'))
+            
+            if 'state' not in shadow_data or 'reported' not in shadow_data['state']:
+                logger.error("Invalid shadow data format")
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps('Invalid shadow data format')
+                }
+                
+            follow_data = shadow_data['state']['reported']
             logger.info(f"Follow vehicle data: {json.dumps(follow_data)}")
+            
+            # Validate follow vehicle data
+            if not all(key in follow_data for key in ['location', 'rotation']):
+                logger.error("Invalid follow vehicle data format")
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps('Invalid follow vehicle data format')
+                }
+                
         except Exception as e:
             logger.error(f"Error getting follow vehicle data: {str(e)}")
             return {
@@ -181,15 +197,29 @@ def lambda_handler(event, context):
             }
 
         # Calculate control commands
-        control_commands = calculate_control_commands(gps_data, follow_data)
+        control_commands = calculate_control_commands(lead_data, follow_data)
+        
+        if control_commands is None:
+            logger.error("Failed to calculate control commands")
+            return {
+                'statusCode': 500,
+                'body': json.dumps('Failed to calculate control commands')
+            }
 
         # Publish control commands to IoT topic
         logger.info(f"Publishing control commands: {json.dumps(control_commands)}")
-        iot.publish(
-            topic='carla/control/vehicle2',
-            qos=1,
-            payload=json.dumps(control_commands)
-        )
+        try:
+            iot.publish(
+                topic='carla/control/vehicle2',
+                qos=1,
+                payload=json.dumps(control_commands)
+            )
+        except Exception as e:
+            logger.error(f"Error publishing control commands: {str(e)}")
+            return {
+                'statusCode': 500,
+                'body': json.dumps('Error publishing control commands')
+            }
 
         return {
             'statusCode': 200,
