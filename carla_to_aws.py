@@ -19,7 +19,29 @@ CA_PATH = os.getenv("AWS_CA_PATH")
 CERT_PATH = os.getenv("AWS_CERT_PATH")
 KEY_PATH = os.getenv("AWS_KEY_PATH")
 
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to AWS IoT successfully!")
+        # Subscribe to the control topic with QoS 1
+        client.subscribe("carla/control/vehicle2", qos=1)
+        print("Subscribed to topic: carla/control/vehicle2")
+    else:
+        print(f"Failed to connect to AWS IoT with return code {rc}")
+
+def on_subscribe(client, userdata, mid, granted_qos):
+    print(f"Successfully subscribed to topic with QoS: {granted_qos}")
+
+def on_disconnect(client, userdata, rc):
+    print(f"Disconnected from AWS IoT with return code {rc}")
+    if rc != 0:
+        print("Attempting to reconnect...")
+        client.reconnect()
+
 mqtt_client = mqtt.Client(client_id=CLIENT_ID)
+mqtt_client.on_connect = on_connect
+mqtt_client.on_subscribe = on_subscribe
+mqtt_client.on_message = on_message
+mqtt_client.on_disconnect = on_disconnect
 mqtt_client.tls_set(ca_certs=CA_PATH, certfile=CERT_PATH, keyfile=KEY_PATH, tls_version=ssl.PROTOCOL_TLSv1_2)
 mqtt_client.connect(AWS_ENDPOINT, 8883, 60)
 mqtt_client.loop_start()
@@ -46,6 +68,7 @@ vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
 spawn_points = world.get_map().get_spawn_points()
 lead_spawn = spawn_points[0]
 lead_vehicle = world.spawn_actor(vehicle_bp, lead_spawn)
+print("Spawned lead vehicle")
 
 # Spawn Car 2 (10 meters behind Car 1)
 follow_spawn = carla.Transform(
@@ -57,6 +80,7 @@ follow_spawn = carla.Transform(
     lead_spawn.rotation
 )
 follow_vehicle = world.spawn_actor(vehicle_bp, follow_spawn)
+print("Spawned following vehicle")
 
 # Camera on Car 1
 cam_bp = bp_lib.find("sensor.camera.rgb")
@@ -81,18 +105,23 @@ gnss_bp = bp_lib.find("sensor.other.gnss")
 gnss = world.spawn_actor(gnss_bp, carla.Transform(), attach_to=lead_vehicle)
 
 last_sent_time = 0
+GPS_UPDATE_INTERVAL = 0.1  # 100ms update rate for smoother platooning
+
 def gps_callback(event):
     global last_sent_time
     now = time.time()
-    if now - last_sent_time >= 3:
-        gps = {
-            "latitude": event.latitude,
-            "longitude": event.longitude,
-            "timestamp": now
-        }
-        mqtt_client.publish("carla/gps", json.dumps(gps))
-        print("Sent GPS to AWS:", gps)
-        last_sent_time = now
+    if now - last_sent_time >= GPS_UPDATE_INTERVAL:
+        try:
+            gps = {
+                "latitude": event.latitude,
+                "longitude": event.longitude,
+                "timestamp": now
+            }
+            mqtt_client.publish("carla/gps", json.dumps(gps), qos=1)
+            print(f"Sent GPS to AWS: {gps}")
+            last_sent_time = now
+        except Exception as e:
+            print(f"Error publishing GPS data: {e}")
 
 gnss.listen(lambda event: gps_callback(event))
 
@@ -101,15 +130,17 @@ follow_control = carla.VehicleControl()
 
 def on_message(client, userdata, msg):
     try:
+        print(f"Received message on topic: {msg.topic}")
+        print(f"Message payload: {msg.payload.decode()}")
         data = json.loads(msg.payload.decode())
         follow_control.throttle = data.get("throttle", 0.0)
         follow_control.steer = data.get("steer", 0.0)
         follow_control.brake = data.get("brake", 0.0)
+        print(f"Applied control values - throttle: {follow_control.throttle}, steer: {follow_control.steer}, brake: {follow_control.brake}")
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse JSON: {e}")
     except Exception as e:
-        print("Failed to parse control msg:", e)
-
-mqtt_client.subscribe("carla/control/vehicle2")
-mqtt_client.on_message = on_message
+        print(f"Error processing control message: {e}")
 
 # Main loop
 clock = pygame.time.Clock()
@@ -127,7 +158,9 @@ while running:
     lead_control.brake = 1.0 if keys[K_s] else 0.0
     lead_vehicle.apply_control(lead_control)
 
+    # Apply control to following vehicle
     follow_vehicle.apply_control(follow_control)
+    print(f"Applied control to following vehicle: throttle={follow_control.throttle}, steer={follow_control.steer}, brake={follow_control.brake}")
 
     if camera_surface:
         screen.blit(camera_surface, (0, 0))
