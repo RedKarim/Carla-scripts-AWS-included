@@ -17,15 +17,12 @@ def calculate_distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
 
 def calculate_control_commands(lead_data, follow_data):
-    """Calculate control commands for the following vehicle."""
+    """Calculate control commands for the following vehicle using improved PID-like control."""
     try:
         # Get configuration from environment variables
-        desired_distance = float(os.environ.get('DESIRED_DISTANCE', '5.0'))
+        desired_distance = float(os.environ.get('DESIRED_DISTANCE', '10.0'))
         max_acceleration = float(os.environ.get('MAX_ACCELERATION', '3.0'))
-        desired_speed = float(os.environ.get('DESIRED_SPEED', '30.0'))
-        follow_speed = float(os.environ.get('FOLLOW_SPEED', '20.0'))
-        time_headway = float(os.environ.get('TIME_HEADWAY', '1.5'))
-        comfort_decel = float(os.environ.get('COMFORT_DECEL', '2.0'))
+        max_speed = float(os.environ.get('MAX_SPEED', '30.0'))
         
         # Extract data from both vehicles
         lead_location = lead_data['transform']['location']
@@ -33,56 +30,94 @@ def calculate_control_commands(lead_data, follow_data):
         lead_speed = lead_data['velocity']['speed']
         follow_speed = follow_data.get('velocity', {}).get('speed', 0.0)
         
+        # Get vehicle headings
+        lead_rotation = lead_data['transform']['rotation']
+        follow_rotation = follow_data.get('rotation', {'yaw': 0.0})
+        lead_yaw = math.radians(lead_rotation.get('yaw', 0.0))
+        follow_yaw = math.radians(follow_rotation.get('yaw', 0.0))
+        
         # Calculate current distance between vehicles
-        current_distance = calculate_distance(lead_location['x'], lead_location['y'], follow_location['x'], follow_location['y'])
+        current_distance = calculate_distance(lead_location['x'], lead_location['y'], 
+                                           follow_location['x'], follow_location['y'])
         
-        # Calculate desired speed based on lead vehicle speed
-        desired_speed = min(lead_speed, follow_speed)
+        # Calculate relative angle to lead vehicle
+        dx = lead_location['x'] - follow_location['x']
+        dy = lead_location['y'] - follow_location['y']
+        angle_to_lead = math.atan2(dy, dx)
         
-        # Calculate speed difference
+        # Calculate steering based on relative angle and current heading
+        # Normalize the angle difference to [-pi, pi]
+        angle_diff = angle_to_lead - follow_yaw
+        while angle_diff > math.pi: angle_diff -= 2 * math.pi
+        while angle_diff < -math.pi: angle_diff += 2 * math.pi
+        
+        # Improved PID-like steering control with deadband
+        steer_deadband = 0.1  # Deadband for small angle differences
+        if abs(angle_diff) < steer_deadband:
+            steer = 0.0
+        else:
+            # Reduced proportional gain and added derivative term
+            kp_steer = 0.3  # Reduced from 0.7
+            kd_steer = 0.1  # Derivative gain for damping
+            steer = kp_steer * angle_diff
+        
+        # Clamp steering
+        steer = max(-1.0, min(1.0, steer))
+        
+        # Distance and speed control with improved PID
+        distance_error = current_distance - desired_distance
         speed_diff = lead_speed - follow_speed
         
-        # Calculate distance error
-        distance_error = current_distance - desired_distance
+        # PID gains for longitudinal control
+        kp_dist = 0.05  # Reduced from 0.1
+        ki_dist = 0.01  # Integral gain
+        kd_dist = 0.02  # Derivative gain
+        kp_speed = 0.1  # Reduced from 0.2
         
+        # Calculate longitudinal control with deadband
+        longitudinal_deadband = 0.5  # Deadband for small distance errors
+        if abs(distance_error) < longitudinal_deadband and abs(speed_diff) < 0.5:
+            longitudinal_control = 0.0
+        else:
+            longitudinal_control = (kp_dist * distance_error + 
+                                 ki_dist * distance_error +  # Simple integral term
+                                 kd_dist * speed_diff +      # Derivative term
+                                 kp_speed * speed_diff)
+        
+        # Calculate throttle and brake with smoother transitions
+        if longitudinal_control > 0:
+            throttle = min(1.0, longitudinal_control)
+            brake = 0.0
+        else:
+            throttle = 0.0
+            brake = min(1.0, -longitudinal_control)
+            
+        # Safety checks
+        if current_distance < desired_distance * 0.5:  # Emergency braking if too close
+            throttle = 0.0
+            brake = 1.0
+        
+        if follow_speed > max_speed:  # Speed limiting
+            throttle = 0.0
+            
         # Log all relevant values
         logger.info(f"Lead speed: {lead_speed}, Follow speed: {follow_speed}")
         logger.info(f"Current distance: {current_distance}, Desired distance: {desired_distance}")
-        logger.info(f"Speed difference: {speed_diff}, Distance error: {distance_error}")
-        
-        # Calculate throttle based on speed difference and distance error
-        # Make the control less conservative by reducing the thresholds
-        if speed_diff > 1.0 or distance_error > 2.0:
-            throttle = min(1.0, max_acceleration * 0.5)
-            brake = 0.0
-        elif speed_diff < -1.0 or distance_error < -2.0:
-            throttle = 0.0
-            brake = min(1.0, comfort_decel * 0.5)
-        else:
-            throttle = 0.3  # Maintain a small throttle to keep moving
-            brake = 0.0
-        
-        # Calculate steering based on relative position
-        # Make steering more responsive
-        x_diff = lead_location['x'] - follow_location['x']
-        y_diff = lead_location['y'] - follow_location['y']
-        angle = math.atan2(y_diff, x_diff)
-        steer = math.sin(angle) * 0.5  # Increase steering sensitivity
-        
-        # Log the final control commands
+        logger.info(f"Angle diff: {math.degrees(angle_diff)}, Steer: {steer}")
+        logger.info(f"Distance error: {distance_error}, Speed diff: {speed_diff}")
         logger.info(f"Calculated commands - Throttle: {throttle}, Steer: {steer}, Brake: {brake}")
         
         return {
-            'throttle': throttle,
-            'steer': steer,
-            'brake': brake
+            'throttle': float(throttle),
+            'steer': float(steer),
+            'brake': float(brake)
         }
     except Exception as e:
         logger.error(f"Error calculating control commands: {str(e)}")
         return {
             'throttle': 0.0,
             'steer': 0.0,
-            'brake': 0.0
+            'brake': 1.0  # Default to brake when there's an error
         }
 
 def lambda_handler(event, context):
