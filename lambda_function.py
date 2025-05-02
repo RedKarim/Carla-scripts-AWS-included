@@ -202,12 +202,15 @@ def lambda_handler(event, context):
         logger.info(f"Getting GPS data from S3: bucket={bucket}, key={key}")
         
         try:
-            s3_start_time = time.time()
             response = s3.get_object(Bucket=bucket, Key=key)
             lead_data = json.loads(response['Body'].read().decode('utf-8'))
-            s3_latency = (time.time() - s3_start_time) * 1000
-            logger.info(f"S3 read latency: {s3_latency:.2f} ms")
             logger.info(f"Lead vehicle data: {json.dumps(lead_data)}")
+            
+            # Extract CARLA timestamp if available
+            carla_timestamp = lead_data.get('carla_timestamp', start_time)
+            aws_receive_time = time.time()
+            carla_to_aws_latency = (aws_receive_time - carla_timestamp) * 1000
+            logger.info(f"CARLA to AWS latency: {carla_to_aws_latency:.2f} ms")
             
             # Validate lead vehicle data
             if not all(key in lead_data for key in ['transform', 'velocity']):
@@ -233,13 +236,10 @@ def lambda_handler(event, context):
         # Get follow vehicle data from IoT shadow
         try:
             logger.info("Getting follow vehicle data from IoT shadow")
-            shadow_start_time = time.time()
             shadow_response = iot.get_thing_shadow(
                 thingName='vehicle2'
             )
             shadow_data = json.loads(shadow_response['payload'].read().decode('utf-8'))
-            shadow_latency = (time.time() - shadow_start_time) * 1000
-            logger.info(f"Shadow read latency: {shadow_latency:.2f} ms")
             
             if 'state' not in shadow_data or 'reported' not in shadow_data['state']:
                 logger.error("Invalid shadow data format")
@@ -267,10 +267,7 @@ def lambda_handler(event, context):
             }
 
         # Calculate control commands
-        control_start_time = time.time()
         control_commands = calculate_control_commands(lead_data, follow_data)
-        control_latency = (time.time() - control_start_time) * 1000
-        logger.info(f"Control calculation latency: {control_latency:.2f} ms")
         
         if control_commands is None:
             logger.error("Failed to calculate control commands")
@@ -279,20 +276,17 @@ def lambda_handler(event, context):
                 'body': json.dumps('Failed to calculate control commands')
             }
 
-        # Add timestamp to control commands
-        control_commands['timestamp'] = time.time()
+        # Add AWS timestamp for latency measurement
+        control_commands['aws_timestamp'] = time.time()
         
         # Publish control commands to IoT topic
         logger.info(f"Publishing control commands: {json.dumps(control_commands)}")
         try:
-            publish_start_time = time.time()
             iot.publish(
                 topic='carla/control/vehicle2',
                 qos=1,
                 payload=json.dumps(control_commands)
             )
-            publish_latency = (time.time() - publish_start_time) * 1000
-            logger.info(f"Publish latency: {publish_latency:.2f} ms")
         except Exception as e:
             logger.error(f"Error publishing control commands: {str(e)}")
             return {
@@ -300,9 +294,9 @@ def lambda_handler(event, context):
                 'body': json.dumps('Error publishing control commands')
             }
 
-        # Calculate total latency
-        total_latency = (time.time() - start_time) * 1000
-        logger.info(f"Total Lambda execution time: {total_latency:.2f} ms")
+        # Calculate total processing time
+        total_time = (time.time() - start_time) * 1000
+        logger.info(f"Total AWS processing time: {total_time:.2f} ms")
 
         return {
             'statusCode': 200,

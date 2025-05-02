@@ -20,6 +20,11 @@ CA_PATH = os.getenv("AWS_CA_PATH")
 CERT_PATH = os.getenv("AWS_CERT_PATH")
 KEY_PATH = os.getenv("AWS_KEY_PATH")
 
+# Add global variables for latency tracking
+last_send_time = 0
+last_receive_time = 0
+round_trip_start_time = 0
+
 def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
     if rc == 0:
@@ -35,17 +40,23 @@ def on_subscribe(client, userdata, mid, granted_qos):
     print(f"Granted QoS levels: {granted_qos}")
 
 def on_message(client, userdata, msg):
+    global last_receive_time, round_trip_start_time
     print(f"Received message on topic: {msg.topic}")
     print(f"Message payload: {msg.payload.decode()}")
     try:
         control_data = json.loads(msg.payload.decode())
         print(f"Parsed control data: {control_data}")
         
-        # Extract and log latency information
-        if 'timestamp' in control_data:
-            aws_receive_time = time.time()
-            latency = aws_receive_time - control_data['timestamp']
-            print(f"Latency from AWS to CARLA: {latency*1000:.2f} ms")
+        # Calculate AWS to CARLA latency
+        if 'aws_timestamp' in control_data:
+            last_receive_time = time.time()
+            aws_to_carla_latency = (last_receive_time - control_data['aws_timestamp']) * 1000
+            print(f"AWS to CARLA latency: {aws_to_carla_latency:.2f} ms")
+            
+            # Calculate round trip latency if we have the start time
+            if round_trip_start_time > 0:
+                round_trip_latency = (last_receive_time - round_trip_start_time) * 1000
+                print(f"Round trip latency: {round_trip_latency:.2f} ms")
         
         # Apply control values with validation and smoothing
         target_throttle = max(0.0, min(1.0, float(control_data.get("throttle", 0.0))))
@@ -188,7 +199,7 @@ last_sent_time = 0
 GPS_UPDATE_INTERVAL = 0.1  # 100ms update rate for smoother platooning
 
 def gps_callback(event):
-    global last_sent_time
+    global last_sent_time, round_trip_start_time
     now = time.time()
     if now - last_sent_time >= GPS_UPDATE_INTERVAL:
         try:
@@ -209,7 +220,7 @@ def gps_callback(event):
                 "latitude": event.latitude,
                 "longitude": event.longitude,
                 "altitude": event.altitude,
-                "timestamp": now,  # Add timestamp for latency measurement
+                "carla_timestamp": now,  # Add CARLA timestamp
                 "velocity": {
                     "x": velocity.x,
                     "y": velocity.y,
@@ -239,11 +250,14 @@ def gps_callback(event):
                 }
             }
             
-            # Log send time for latency measurement
-            send_time = time.time()
+            # Record start time for round trip measurement
+            round_trip_start_time = time.time()
+            
+            # Publish data and measure CARLA to AWS latency
             mqtt_client.publish("carla/gps", json.dumps(data), qos=1)
-            publish_latency = (time.time() - send_time) * 1000
-            print(f"Publish latency: {publish_latency:.2f} ms")
+            carla_to_aws_latency = (time.time() - round_trip_start_time) * 1000
+            print(f"CARLA to AWS latency: {carla_to_aws_latency:.2f} ms")
+            
             print(f"Sent vehicle data to AWS: {json.dumps(data)}")
             last_sent_time = now
         except Exception as e:
