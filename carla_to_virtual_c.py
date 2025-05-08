@@ -10,6 +10,10 @@ from pygame.locals import K_w, K_s, K_a, K_d, K_q, K_ESCAPE
 import paho.mqtt.client as mqtt
 import math
 
+# ========== CONFIGURATION ==========
+NUM_FOLLOWING_VEHICLES = 3  # Number of following vehicles to spawn
+VEHICLE_SPACING = 15.0  # Distance between vehicles in meters
+
 # ========== MQTT SETUP ==========
 MQTT_BROKER = "192.168.0.127"  # Your Mac's IP address
 MQTT_PORT = 1883
@@ -19,6 +23,10 @@ CLIENT_ID = "carla_client"
 last_send_time = 0
 last_receive_time = 0
 round_trip_start_time = 0
+
+# Dictionary to store following vehicles and their controls
+following_vehicles = {}
+following_controls = {}
 
 def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
@@ -42,16 +50,21 @@ def on_message(client, userdata, msg):
         control_data = json.loads(msg.payload.decode())
         print(f"Parsed control data: {control_data}")
         
+        # Extract vehicle ID from topic
+        vehicle_id = int(msg.topic.split('/')[-1].replace('vehicle', ''))
+        
+        if vehicle_id not in following_controls:
+            following_controls[vehicle_id] = carla.VehicleControl()
+        
         # Calculate processing latency
         if 'timestamp' in control_data:
             last_receive_time = time.time()
             processing_latency = (last_receive_time - control_data['timestamp']) * 1000
-            print(f"Processing latency: {processing_latency:.2f} ms")
+            print(f"Processing latency for vehicle {vehicle_id}: {processing_latency:.2f} ms")
             
-            # Calculate round trip latency if we have the start time
             if round_trip_start_time > 0:
                 round_trip_latency = (last_receive_time - round_trip_start_time) * 1000
-                print(f"Round trip latency: {round_trip_latency:.2f} ms")
+                print(f"Round trip latency for vehicle {vehicle_id}: {round_trip_latency:.2f} ms")
         
         # Apply control values with validation and smoothing
         target_throttle = max(0.0, min(1.0, float(control_data.get("throttle", 0.0))))
@@ -59,17 +72,17 @@ def on_message(client, userdata, msg):
         target_brake = max(0.0, min(1.0, float(control_data.get("brake", 0.0))))
         
         # Smooth transitions with reduced smoothing factor for more responsive control
-        follow_control.throttle = follow_control.throttle + (target_throttle - follow_control.throttle) * 0.7
-        follow_control.steer = follow_control.steer + (target_steer - follow_control.steer) * 0.5
-        follow_control.brake = follow_control.brake + (target_brake - follow_control.brake) * 0.7
+        following_controls[vehicle_id].throttle = following_controls[vehicle_id].throttle + (target_throttle - following_controls[vehicle_id].throttle) * 0.7
+        following_controls[vehicle_id].steer = following_controls[vehicle_id].steer + (target_steer - following_controls[vehicle_id].steer) * 0.5
+        following_controls[vehicle_id].brake = following_controls[vehicle_id].brake + (target_brake - following_controls[vehicle_id].brake) * 0.7
         
-        print(f"Applied control values - throttle: {follow_control.throttle}, steer: {follow_control.steer}, brake: {follow_control.brake}")
+        print(f"Applied control values for vehicle {vehicle_id} - throttle: {following_controls[vehicle_id].throttle}, steer: {following_controls[vehicle_id].steer}, brake: {following_controls[vehicle_id].brake}")
     except Exception as e:
         print(f"Error processing message: {e}")
         # Reset to safe values on error
-        follow_control.throttle = 0.0
-        follow_control.steer = 0.0
-        follow_control.brake = 1.0
+        following_controls[vehicle_id].throttle = 0.0
+        following_controls[vehicle_id].steer = 0.0
+        following_controls[vehicle_id].brake = 1.0
 
 def on_disconnect(client, userdata, rc):
     print(f"Disconnected from MQTT broker with result code {rc}")
@@ -116,17 +129,26 @@ lead_spawn = spawn_points[0]
 lead_vehicle = world.spawn_actor(vehicle_bp, lead_spawn)
 print("Spawned lead vehicle")
 
-# Spawn Car 2 (15 meters behind Car 1)
-follow_spawn = carla.Transform(
-    carla.Location(
-        x=lead_spawn.location.x - 15 * math.cos(math.radians(lead_spawn.rotation.yaw)),
-        y=lead_spawn.location.y - 15 * math.sin(math.radians(lead_spawn.rotation.yaw)),
-        z=lead_spawn.location.z
-    ),
-    lead_spawn.rotation
-)
-follow_vehicle = world.spawn_actor(vehicle_bp, follow_spawn)
-print("Spawned following vehicle")
+# Spawn following vehicles
+prev_spawn = lead_spawn
+for i in range(NUM_FOLLOWING_VEHICLES):
+    # Calculate spawn position based on previous vehicle
+    follow_spawn = carla.Transform(
+        carla.Location(
+            x=prev_spawn.location.x - VEHICLE_SPACING * math.cos(math.radians(prev_spawn.rotation.yaw)),
+            y=prev_spawn.location.y - VEHICLE_SPACING * math.sin(math.radians(prev_spawn.rotation.yaw)),
+            z=prev_spawn.location.z
+        ),
+        prev_spawn.rotation
+    )
+    
+    vehicle_id = i + 2  # Vehicle IDs start from 2
+    following_vehicles[vehicle_id] = world.spawn_actor(vehicle_bp, follow_spawn)
+    following_controls[vehicle_id] = carla.VehicleControl()
+    print(f"Spawned following vehicle {vehicle_id}")
+    
+    # Update previous spawn point for next vehicle
+    prev_spawn = follow_spawn
 
 # Camera on Car 1
 cam_bp = bp_lib.find("sensor.camera.rgb")
@@ -160,19 +182,11 @@ def gps_callback(event):
         try:
             # Get lead vehicle data
             lead_velocity = lead_vehicle.get_velocity()
-            lead_speed = math.sqrt(lead_velocity.x**2 + lead_velocity.y**2 + lead_velocity.z**2)  # m/s
+            lead_speed = math.sqrt(lead_velocity.x**2 + lead_velocity.y**2 + lead_velocity.z**2)
             lead_transform = lead_vehicle.get_transform()
             lead_location = lead_transform.location
             lead_rotation = lead_transform.rotation
             lead_control = lead_vehicle.get_control()
-            
-            # Get following vehicle data
-            follow_velocity = follow_vehicle.get_velocity()
-            follow_speed = math.sqrt(follow_velocity.x**2 + follow_velocity.y**2 + follow_velocity.z**2)  # m/s
-            follow_transform = follow_vehicle.get_transform()
-            follow_location = follow_transform.location
-            follow_rotation = follow_transform.rotation
-            follow_control = follow_vehicle.get_control()
             
             # Prepare data package with timestamp
             data = {
@@ -208,7 +222,20 @@ def gps_callback(event):
                         "gear": lead_control.gear
                     }
                 },
-                "follow_vehicle": {
+                "following_vehicles": {},
+                "timestamp": now
+            }
+            
+            # Add data for each following vehicle
+            for vehicle_id, vehicle in following_vehicles.items():
+                follow_velocity = vehicle.get_velocity()
+                follow_speed = math.sqrt(follow_velocity.x**2 + follow_velocity.y**2 + follow_velocity.z**2)
+                follow_transform = vehicle.get_transform()
+                follow_location = follow_transform.location
+                follow_rotation = follow_transform.rotation
+                follow_control = vehicle.get_control()
+                
+                data["following_vehicles"][str(vehicle_id)] = {
                     "velocity": {
                         "x": follow_velocity.x,
                         "y": follow_velocity.y,
@@ -236,9 +263,7 @@ def gps_callback(event):
                         "manual_gear_shift": follow_control.manual_gear_shift,
                         "gear": follow_control.gear
                     }
-                },
-                "timestamp": now  # Add timestamp for latency calculation
-            }
+                }
             
             # Record start time for round trip measurement
             round_trip_start_time = time.time()
@@ -248,7 +273,7 @@ def gps_callback(event):
             publish_latency = (time.time() - round_trip_start_time) * 1000
             print(f"Publish latency: {publish_latency:.2f} ms")
             
-            print(f"Sent vehicle data to MQTT broker: {json.dumps(data)}")
+            print(f"Sent vehicle data to MQTT broker")
             last_sent_time = now
         except Exception as e:
             print(f"Error publishing vehicle data: {e}")
@@ -277,7 +302,7 @@ while running:
     
     # Smooth throttle control
     if keys[K_w]:
-        current_throttle = min(current_throttle + THROTTLE_INCREMENT, 0.7)  # Max 70% throttle
+        current_throttle = min(current_throttle + THROTTLE_INCREMENT, 0.7)
         current_brake = 0.0
     elif keys[K_s]:
         current_brake = min(current_brake + BRAKE_INCREMENT, 1.0)
@@ -288,11 +313,10 @@ while running:
     
     # Smooth steering control
     if keys[K_a]:
-        current_steer = max(current_steer - STEER_INCREMENT, -0.7)  # Smooth left turn, max 70% left
+        current_steer = max(current_steer - STEER_INCREMENT, -0.7)
     elif keys[K_d]:
-        current_steer = min(current_steer + STEER_INCREMENT, 0.7)   # Smooth right turn, max 70% right
+        current_steer = min(current_steer + STEER_INCREMENT, 0.7)
     else:
-        # Return steering to center
         if current_steer > 0:
             current_steer = max(current_steer - STEER_INCREMENT, 0.0)
         else:
@@ -304,9 +328,10 @@ while running:
     lead_control.steer = current_steer
     lead_vehicle.apply_control(lead_control)
 
-    # Apply control to following vehicle
-    follow_vehicle.apply_control(follow_control)
-    print(f"Applied control to following vehicle: throttle={follow_control.throttle}, steer={follow_control.steer}, brake={follow_control.brake}")
+    # Apply control to all following vehicles
+    for vehicle_id, vehicle in following_vehicles.items():
+        vehicle.apply_control(following_controls[vehicle_id])
+        print(f"Applied control to vehicle {vehicle_id}: throttle={following_controls[vehicle_id].throttle}, steer={following_controls[vehicle_id].steer}, brake={following_controls[vehicle_id].brake}")
 
     if camera_surface:
         screen.blit(camera_surface, (0, 0))
@@ -319,7 +344,8 @@ gnss.stop()
 camera.destroy()
 gnss.destroy()
 lead_vehicle.destroy()
-follow_vehicle.destroy()
+for vehicle in following_vehicles.values():
+    vehicle.destroy()
 mqtt_client.loop_stop()
 mqtt_client.disconnect()
 pygame.quit()
