@@ -4,21 +4,16 @@ import sys
 import carla
 import time
 import json
-import ssl
 import pygame
 import numpy as np
 from pygame.locals import K_w, K_s, K_a, K_d, K_q, K_ESCAPE
-from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 import math
 
-# ========== ENV + MQTT SETUP ==========
-load_dotenv()
-AWS_ENDPOINT = os.getenv("AWS_ENDPOINT")
-CLIENT_ID = os.getenv("CLIENT_ID") + "_car2"
-CA_PATH = os.getenv("AWS_CA_PATH")
-CERT_PATH = os.getenv("AWS_CERT_PATH")
-KEY_PATH = os.getenv("AWS_KEY_PATH")
+# ========== MQTT SETUP ==========
+MQTT_BROKER = "localhost"  # Your Mac's IP address
+MQTT_PORT = 1883
+CLIENT_ID = "carla_client"
 
 # Add global variables for latency tracking
 last_send_time = 0
@@ -28,12 +23,12 @@ round_trip_start_time = 0
 def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
     if rc == 0:
-        print("Successfully connected to AWS IoT")
+        print("Successfully connected to MQTT broker")
         # Subscribe to the control topic
         client.subscribe("carla/control/vehicle2", qos=1)
         print("Subscribed to topic: carla/control/vehicle2")
     else:
-        print(f"Failed to connect to AWS IoT with result code {rc}")
+        print(f"Failed to connect to MQTT broker with result code {rc}")
 
 def on_subscribe(client, userdata, mid, granted_qos):
     print(f"Successfully subscribed to topic with message ID {mid}")
@@ -47,11 +42,11 @@ def on_message(client, userdata, msg):
         control_data = json.loads(msg.payload.decode())
         print(f"Parsed control data: {control_data}")
         
-        # Calculate AWS to CARLA latency
-        if 'aws_timestamp' in control_data:
+        # Calculate processing latency
+        if 'timestamp' in control_data:
             last_receive_time = time.time()
-            aws_to_carla_latency = (last_receive_time - control_data['aws_timestamp']) * 1000
-            print(f"AWS to CARLA latency: {aws_to_carla_latency:.2f} ms")
+            processing_latency = (last_receive_time - control_data['timestamp']) * 1000
+            print(f"Processing latency: {processing_latency:.2f} ms")
             
             # Calculate round trip latency if we have the start time
             if round_trip_start_time > 0:
@@ -68,43 +63,6 @@ def on_message(client, userdata, msg):
         follow_control.steer = follow_control.steer + (target_steer - follow_control.steer) * 0.5
         follow_control.brake = follow_control.brake + (target_brake - follow_control.brake) * 0.7
         
-        # Update vehicle state in IoT shadow
-        try:
-            velocity = follow_vehicle.get_velocity()
-            speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
-            transform = follow_vehicle.get_transform()
-            
-            state_update = {
-                "state": {
-                    "reported": {
-                        "location": {
-                            "x": transform.location.x,
-                            "y": transform.location.y,
-                            "z": transform.location.z
-                        },
-                        "rotation": {
-                            "yaw": transform.rotation.yaw,
-                            "pitch": transform.rotation.pitch,
-                            "roll": transform.rotation.roll
-                        },
-                        "velocity": {
-                            "x": velocity.x,
-                            "y": velocity.y,
-                            "z": velocity.z,
-                            "speed": speed
-                        }
-                    }
-                }
-            }
-            
-            mqtt_client.publish(
-                "$aws/things/vehicle2/shadow/update",
-                json.dumps(state_update),
-                qos=1
-            )
-        except Exception as e:
-            print(f"Error updating vehicle state: {e}")
-        
         print(f"Applied control values - throttle: {follow_control.throttle}, steer: {follow_control.steer}, brake: {follow_control.brake}")
     except Exception as e:
         print(f"Error processing message: {e}")
@@ -114,7 +72,7 @@ def on_message(client, userdata, msg):
         follow_control.brake = 1.0
 
 def on_disconnect(client, userdata, rc):
-    print(f"Disconnected from AWS IoT with result code {rc}")
+    print(f"Disconnected from MQTT broker with result code {rc}")
     if rc != 0:
         print("Unexpected disconnection. Attempting to reconnect...")
         client.reconnect()
@@ -129,12 +87,9 @@ mqtt_client.on_subscribe = on_subscribe
 mqtt_client.on_message = on_message
 mqtt_client.on_disconnect = on_disconnect
 
-# Configure TLS
-mqtt_client.tls_set(ca_certs=CA_PATH, certfile=CERT_PATH, keyfile=KEY_PATH, tls_version=ssl.PROTOCOL_TLSv1_2)
-
-# Connect to AWS IoT
-print("Connecting to AWS IoT...")
-mqtt_client.connect(AWS_ENDPOINT, 8883, 60)
+# Connect to MQTT broker
+print("Connecting to MQTT broker...")
+mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 mqtt_client.loop_start()
 
 # ========== CARLA SETUP ==========
@@ -191,7 +146,7 @@ def process_image(image):
 
 camera.listen(lambda image: process_image(image))
 
-# GNSS for Car 1 (publishes to AWS)
+# GNSS for Car 1 (publishes to MQTT)
 gnss_bp = bp_lib.find("sensor.other.gnss")
 gnss = world.spawn_actor(gnss_bp, carla.Transform(), attach_to=lead_vehicle)
 
@@ -220,7 +175,7 @@ def gps_callback(event):
                 "latitude": event.latitude,
                 "longitude": event.longitude,
                 "altitude": event.altitude,
-                "carla_timestamp": now,  # Add CARLA timestamp
+                "timestamp": now,  # Add timestamp for latency calculation
                 "velocity": {
                     "x": velocity.x,
                     "y": velocity.y,
@@ -253,12 +208,12 @@ def gps_callback(event):
             # Record start time for round trip measurement
             round_trip_start_time = time.time()
             
-            # Publish data and measure CARLA to AWS latency
+            # Publish data and measure latency
             mqtt_client.publish("carla/gps", json.dumps(data), qos=1)
-            carla_to_aws_latency = (time.time() - round_trip_start_time) * 1000
-            print(f"CARLA to AWS latency: {carla_to_aws_latency:.2f} ms")
+            publish_latency = (time.time() - round_trip_start_time) * 1000
+            print(f"Publish latency: {publish_latency:.2f} ms")
             
-            print(f"Sent vehicle data to AWS: {json.dumps(data)}")
+            print(f"Sent vehicle data to MQTT broker: {json.dumps(data)}")
             last_sent_time = now
         except Exception as e:
             print(f"Error publishing vehicle data: {e}")
