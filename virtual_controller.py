@@ -9,9 +9,13 @@ MQTT_PORT = 1883
 CLIENT_ID = "virtual_controller"
 
 # Car following parameters
-TARGET_DISTANCE = 15.0  # meters
-Kp_distance = 0.5  # Proportional gain for distance control
-Kp_steer = 0.8    # Proportional gain for steering control
+TARGET_DISTANCE = 5.0  # Reduced target distance for closer following
+Kp_distance = 2.0  # Increased proportional gain for more responsive distance control
+Kp_steer = 0.5    # Reduced steering gain for smoother turns
+MAX_SPEED = 30.0  # Increased maximum speed
+MIN_SPEED = 5.0   # Increased minimum speed
+ACCELERATION_GAIN = 1.0  # Increased acceleration gain
+STEERING_GAIN = 0.3  # Reduced steering gain
 
 # Vehicle state storage
 lead_vehicle_data = None
@@ -38,26 +42,45 @@ def calculate_control(lead_data, follow_data):
         dy = lead_pos['y'] - follow_pos['y']
         distance = math.sqrt(dx*dx + dy*dy)
         
-        # Calculate angle to lead vehicle
+        # Calculate angle to lead vehicle (in radians)
         angle = math.atan2(dy, dx)
         
+        # Normalize angle to [-pi, pi]
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+            
         # Calculate desired speed based on distance error
         distance_error = distance - TARGET_DISTANCE
-        target_speed = max(0, min(30, distance_error * Kp_distance))  # Limit speed to 30 m/s
+        target_speed = max(MIN_SPEED, min(MAX_SPEED, abs(distance_error) * Kp_distance))
         
-        # Calculate steering based on angle
+        # Calculate steering based on angle (normalized to [-1, 1])
         steer = max(-1.0, min(1.0, angle * Kp_steer))
         
-        # Calculate throttle and brake
+        # Calculate throttle and brake based on speed error
         current_speed = follow_data['velocity']['speed']
         speed_error = target_speed - current_speed
         
-        if speed_error > 0:
-            throttle = min(1.0, speed_error * 0.1)
+        # More aggressive acceleration control
+        if speed_error > 0.5:  # Need acceleration
+            throttle = min(1.0, speed_error * ACCELERATION_GAIN)
             brake = 0.0
-        else:
+        elif speed_error < -0.5:  # Need deceleration
             throttle = 0.0
-            brake = min(1.0, -speed_error * 0.1)
+            brake = min(1.0, -speed_error * ACCELERATION_GAIN)
+        else:  # Fine-tune speed
+            throttle = 0.3  # Maintain some throttle for better acceleration
+            brake = 0.0
+        
+        # Add steering correction based on current yaw
+        current_yaw = follow_data['transform']['rotation']['yaw']
+        lead_yaw = lead_data['transform']['rotation']['yaw']
+        yaw_error = (lead_yaw - current_yaw) % 360
+        if yaw_error > 180:
+            yaw_error -= 360
+        steer += yaw_error * STEERING_GAIN / 180.0  # Normalize to [-1, 1]
+        steer = max(-1.0, min(1.0, steer))
         
         print(f"Control calculation - Distance: {distance:.2f}m, Angle: {math.degrees(angle):.2f}°, Target Speed: {target_speed:.2f}m/s, Current Speed: {current_speed:.2f}m/s")
         
