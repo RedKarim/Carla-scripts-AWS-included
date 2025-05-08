@@ -158,51 +158,86 @@ def gps_callback(event):
     now = time.time()
     if now - last_sent_time >= GPS_UPDATE_INTERVAL:
         try:
-            # Get vehicle velocity
-            velocity = lead_vehicle.get_velocity()
-            speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)  # m/s
+            # Get lead vehicle data
+            lead_velocity = lead_vehicle.get_velocity()
+            lead_speed = math.sqrt(lead_velocity.x**2 + lead_velocity.y**2 + lead_velocity.z**2)  # m/s
+            lead_transform = lead_vehicle.get_transform()
+            lead_location = lead_transform.location
+            lead_rotation = lead_transform.rotation
+            lead_control = lead_vehicle.get_control()
             
-            # Get vehicle transform
-            transform = lead_vehicle.get_transform()
-            location = transform.location
-            rotation = transform.rotation
-            
-            # Get vehicle control state
-            control = lead_vehicle.get_control()
+            # Get following vehicle data
+            follow_velocity = follow_vehicle.get_velocity()
+            follow_speed = math.sqrt(follow_velocity.x**2 + follow_velocity.y**2 + follow_velocity.z**2)  # m/s
+            follow_transform = follow_vehicle.get_transform()
+            follow_location = follow_transform.location
+            follow_rotation = follow_transform.rotation
+            follow_control = follow_vehicle.get_control()
             
             # Prepare data package with timestamp
             data = {
-                "latitude": event.latitude,
-                "longitude": event.longitude,
-                "altitude": event.altitude,
-                "timestamp": now,  # Add timestamp for latency calculation
-                "velocity": {
-                    "x": velocity.x,
-                    "y": velocity.y,
-                    "z": velocity.z,
-                    "speed": speed
-                },
-                "transform": {
-                    "location": {
-                        "x": location.x,
-                        "y": location.y,
-                        "z": location.z
+                "lead_vehicle": {
+                    "latitude": event.latitude,
+                    "longitude": event.longitude,
+                    "altitude": event.altitude,
+                    "velocity": {
+                        "x": lead_velocity.x,
+                        "y": lead_velocity.y,
+                        "z": lead_velocity.z,
+                        "speed": lead_speed
                     },
-                    "rotation": {
-                        "pitch": rotation.pitch,
-                        "yaw": rotation.yaw,
-                        "roll": rotation.roll
+                    "transform": {
+                        "location": {
+                            "x": lead_location.x,
+                            "y": lead_location.y,
+                            "z": lead_location.z
+                        },
+                        "rotation": {
+                            "pitch": lead_rotation.pitch,
+                            "yaw": lead_rotation.yaw,
+                            "roll": lead_rotation.roll
+                        }
+                    },
+                    "control": {
+                        "throttle": lead_control.throttle,
+                        "steer": lead_control.steer,
+                        "brake": lead_control.brake,
+                        "hand_brake": lead_control.hand_brake,
+                        "reverse": lead_control.reverse,
+                        "manual_gear_shift": lead_control.manual_gear_shift,
+                        "gear": lead_control.gear
                     }
                 },
-                "control": {
-                    "throttle": control.throttle,
-                    "steer": control.steer,
-                    "brake": control.brake,
-                    "hand_brake": control.hand_brake,
-                    "reverse": control.reverse,
-                    "manual_gear_shift": control.manual_gear_shift,
-                    "gear": control.gear
-                }
+                "follow_vehicle": {
+                    "velocity": {
+                        "x": follow_velocity.x,
+                        "y": follow_velocity.y,
+                        "z": follow_velocity.z,
+                        "speed": follow_speed
+                    },
+                    "transform": {
+                        "location": {
+                            "x": follow_location.x,
+                            "y": follow_location.y,
+                            "z": follow_location.z
+                        },
+                        "rotation": {
+                            "pitch": follow_rotation.pitch,
+                            "yaw": follow_rotation.yaw,
+                            "roll": follow_rotation.roll
+                        }
+                    },
+                    "control": {
+                        "throttle": follow_control.throttle,
+                        "steer": follow_control.steer,
+                        "brake": follow_control.brake,
+                        "hand_brake": follow_control.hand_brake,
+                        "reverse": follow_control.reverse,
+                        "manual_gear_shift": follow_control.manual_gear_shift,
+                        "gear": follow_control.gear
+                    }
+                },
+                "timestamp": now  # Add timestamp for latency calculation
             }
             
             # Record start time for round trip measurement
