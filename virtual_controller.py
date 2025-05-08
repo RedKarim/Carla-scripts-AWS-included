@@ -13,9 +13,22 @@ TARGET_DISTANCE = 15.0  # meters
 Kp_distance = 0.5  # Proportional gain for distance control
 Kp_steer = 0.8    # Proportional gain for steering control
 
+# Vehicle state storage
+lead_vehicle_data = None
+follow_vehicle_data = None
+
 def calculate_control(lead_data, follow_data):
     """Calculate control commands based on lead and follow vehicle data"""
     try:
+        if lead_data is None or follow_data is None:
+            print("Missing vehicle data, cannot calculate control")
+            return {
+                "throttle": 0.0,
+                "steer": 0.0,
+                "brake": 1.0,
+                "timestamp": time.time()
+            }
+
         # Extract positions
         lead_pos = lead_data['transform']['location']
         follow_pos = follow_data['transform']['location']
@@ -46,6 +59,8 @@ def calculate_control(lead_data, follow_data):
             throttle = 0.0
             brake = min(1.0, -speed_error * 0.1)
         
+        print(f"Control calculation - Distance: {distance:.2f}m, Angle: {math.degrees(angle):.2f}°, Target Speed: {target_speed:.2f}m/s, Current Speed: {current_speed:.2f}m/s")
+        
         return {
             "throttle": throttle,
             "steer": steer,
@@ -72,14 +87,17 @@ def on_connect(client, userdata, flags, rc):
         print(f"Failed to connect to MQTT broker with result code {rc}")
 
 def on_message(client, userdata, msg):
+    global lead_vehicle_data, follow_vehicle_data
     try:
         data = json.loads(msg.payload.decode())
         print(f"Received vehicle data: {data}")
         
-        # Process the data and calculate control commands
-        control_commands = calculate_control(data, data)  # For now, using same data for both vehicles
+        # Update vehicle data
+        lead_vehicle_data = data['lead_vehicle']
+        follow_vehicle_data = data['follow_vehicle']
         
-        # Publish control commands
+        # Calculate and send control commands
+        control_commands = calculate_control(lead_vehicle_data, follow_vehicle_data)
         client.publish("carla/control/vehicle2", json.dumps(control_commands), qos=1)
         print(f"Published control commands: {control_commands}")
         
