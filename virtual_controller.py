@@ -4,17 +4,18 @@ import time
 import math
 
 # MQTT Configuration
-MQTT_BROKER = "localhost"
+MQTT_BROKER = "192.168.0.127"  # IP address of the device running the MQTT broker
 MQTT_PORT = 1883
 CLIENT_ID = "virtual_controller"
 
 # Car following parameters
-desired_speed = 20.0  # Increased base desired speed
-safe_time_headway = 1.5  # Reduced time headway for quicker response
-max_acceleration = 2.5  # Increased base acceleration
-comfortable_deceleration = 4.0  # Increased deceleration for better safety
-minimum_spacing = 6.0  # Reduced minimum spacing
-delta = 4.0  # acceleration exponent
+desired_speed = 30.0  # Increased desired speed
+safe_time_headway = 1.0  # Reduced time headway for quicker response
+max_acceleration = 3.0  # Increased acceleration
+comfortable_deceleration = 3.0  # Reduced deceleration for smoother following
+minimum_spacing = 5.0  # Reduced minimum spacing
+delta = 2.0  # Reduced acceleration exponent for smoother response
+Kp_steer = 0.8  # Increased steering gain for better tracking
 
 # Advanced Safety Parameters
 emergency_braking_distance = 8.0  # Increased emergency braking distance
@@ -29,178 +30,96 @@ initial_distance_threshold = 15.0  # Distance threshold for initial acceleration
 
 # Vehicle state storage
 lead_vehicle_data = None
-follow_vehicle_data = None
+following_vehicles_data = {}
 
 def calculate_distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
 
-def calculate_control(lead_data, follow_data):
-    """Calculate control commands using an advanced car-following model with predictive elements."""
-    try:
-        if lead_data is None or follow_data is None:
-            print("Missing vehicle data, cannot calculate control")
-            return {
-                "throttle": 0.0,
-                "steer": 0.0,
-                "brake": 1.0,
-                "timestamp": time.time()
-            }
-
-        # Get current states
-        lead_location = lead_data['transform']['location']
-        follow_location = follow_data['transform']['location']
-        lead_speed = lead_data['velocity']['speed']
-        follow_speed = follow_data['velocity']['speed']
-        lead_rotation = lead_data['transform']['rotation']
-        follow_rotation = follow_data['transform']['rotation']
-        
-        # Calculate relative states
-        relative_speed = follow_speed - lead_speed
-        current_distance = calculate_distance(lead_location['x'], lead_location['y'], 
-                                           follow_location['x'], follow_location['y'])
-        
-        # Calculate relative heading and path curvature
-        lead_yaw = math.radians(lead_rotation.get('yaw', 0.0))
-        follow_yaw = math.radians(follow_rotation.get('yaw', 0.0))
-        heading_diff = abs(lead_yaw - follow_yaw)
-        if heading_diff > math.pi:
-            heading_diff = 2 * math.pi - heading_diff
-        
-        # Scenario Detection and Adaptive Parameters
-        is_curve = heading_diff > curve_detection_threshold
-        is_approaching = relative_speed > 0 and current_distance < emergency_braking_distance
-        is_accelerating = lead_speed > follow_speed and current_distance > minimum_spacing
-        is_initial_following = current_distance > initial_distance_threshold and follow_speed < 2.0
-        
-        # Adaptive Parameters based on Scenario
-        current_desired_speed = desired_speed
-        current_safe_time_headway = safe_time_headway
-        current_minimum_spacing = minimum_spacing
-        current_max_acceleration = max_acceleration
-        
-        if is_initial_following:
-            current_max_acceleration *= initial_acceleration_boost
-            current_desired_speed = max(desired_speed, lead_speed * 1.2)
-            current_safe_time_headway *= 0.8
-        
-        if is_curve:
-            current_desired_speed *= 0.7
-            current_safe_time_headway *= 1.2
-            current_minimum_spacing *= 1.2
-            
-        if is_approaching:
-            current_desired_speed = min(current_desired_speed, lead_speed)
-            current_safe_time_headway *= 1.3
-            current_max_acceleration *= 0.7
-            
-        if is_accelerating:
-            current_max_acceleration *= 1.2
-            
-        # Enhanced Predictive Safety Checks
-        predicted_distance = current_distance + relative_speed * prediction_horizon
-        predicted_relative_speed = relative_speed + (lead_speed - follow_speed) * prediction_horizon
-        
-        # More aggressive emergency conditions
-        if current_distance < critical_distance or predicted_distance < critical_distance:
-            print("Critical distance - full emergency stop")
-            return {
-                "throttle": 0.0,
-                "steer": 0.0,
-                "brake": 1.0,
-                "timestamp": time.time()
-            }
-            
-        if (current_distance < emergency_braking_distance and 
-            (relative_speed > relative_speed_threshold or predicted_relative_speed > relative_speed_threshold)):
-            print("Emergency braking - approaching too fast")
-            return {
-                "throttle": 0.0,
-                "steer": 0.0,
-                "brake": 1.0,
-                "timestamp": time.time()
-            }
-        
-        # Enhanced IDM with Predictive Elements
-        base_gap = current_minimum_spacing + (follow_speed * current_safe_time_headway)
-        relative_speed_gap = ((follow_speed * (follow_speed - lead_speed)) / 
-                            (2 * math.sqrt(current_max_acceleration * comfortable_deceleration)))
-        curve_gap = current_minimum_spacing * 0.2 if is_curve else 0.0
-        desired_minimum_gap = base_gap + relative_speed_gap + curve_gap
-        
-        if predicted_relative_speed > 0:
-            desired_minimum_gap *= (1 + predicted_relative_speed / 10.0)
-        
-        # Enhanced IDM Acceleration Calculation with initial boost
-        free_road_term = 1 - (follow_speed / current_desired_speed)**delta
-        interaction_term = (desired_minimum_gap / current_distance)**2
-        relative_speed_term = 0.5 * (relative_speed / current_desired_speed)**2
-        curve_term = 0.3 if is_curve else 0.0
-        
-        acceleration = current_max_acceleration * (free_road_term - interaction_term - relative_speed_term - curve_term)
-        
-        # Apply initial acceleration boost
-        if is_initial_following:
-            acceleration *= initial_acceleration_boost
-        
-        # Convert acceleration to control commands with enhanced safety
-        if acceleration > 0:
-            distance_factor = min(1.0, current_distance / (2 * current_minimum_spacing))
-            speed_factor = 1.0 - (follow_speed / current_desired_speed) if follow_speed > current_desired_speed else 1.0
-            curve_factor = 1.0 - (heading_diff / math.pi) if is_curve else 1.0
-            
-            # Enhanced throttle control
-            throttle = min(acceleration / current_max_acceleration, 0.8) * distance_factor * speed_factor * curve_factor
-            if is_initial_following:
-                throttle = max(throttle, 0.4)  # Ensure minimum throttle during initial following
-            brake = 0.0
-        else:
-            throttle = 0.0
-            brake_factor = 1.0 + (abs(relative_speed) / relative_speed_threshold)
-            brake = min(-acceleration / comfortable_deceleration, 0.9) * brake_factor
-        
-        # Advanced Steering Control with enhanced safety
-        dx = lead_location['x'] - follow_location['x']
-        dy = lead_location['y'] - follow_location['y']
-        angle_to_lead = math.atan2(dy, dx)
-        
-        angle_diff = angle_to_lead - follow_yaw
-        while angle_diff > math.pi: angle_diff -= 2 * math.pi
-        while angle_diff < -math.pi: angle_diff += 2 * math.pi
-        
-        # Dynamic steering gain with enhanced safety
-        base_kp_steer = 0.2
-        speed_factor = max(0.5, min(1.0, follow_speed / current_desired_speed))
-        distance_factor = min(1.0, current_distance / current_minimum_spacing)
-        curve_factor = 1.2 if is_curve else 1.0
-        
-        # Reduce steering gain when too close
-        if current_distance < emergency_braking_distance:
-            base_kp_steer *= 0.5
-        
-        kp_steer = base_kp_steer * speed_factor * distance_factor * curve_factor
-        
-        predicted_angle = angle_diff + (lead_yaw - follow_yaw) * prediction_horizon
-        steer = kp_steer * (0.7 * angle_diff + 0.3 * predicted_angle)
-        steer = max(-0.4, min(0.4, steer))
-        
-        print(f"Control calculation - Distance: {current_distance:.2f}m, Relative Speed: {relative_speed:.2f}m/s")
-        print(f"Throttle: {throttle:.2f}, Steer: {steer:.2f}, Brake: {brake:.2f}")
-        
-        return {
-            "throttle": float(throttle),
-            "steer": float(steer),
-            "brake": float(brake),
-            "timestamp": time.time()
-        }
-        
-    except Exception as e:
-        print(f"Error calculating control: {e}")
-        return {
-            "throttle": 0.0,
-            "steer": 0.0,
-            "brake": 1.0,
-            "timestamp": time.time()
-        }
+def calculate_control(lead_vehicle, follow_vehicle, vehicle_id):
+    # Calculate distance and relative speed
+    distance = calculate_distance(
+        lead_vehicle['transform']['location']['x'],
+        lead_vehicle['transform']['location']['y'],
+        follow_vehicle['transform']['location']['x'],
+        follow_vehicle['transform']['location']['y']
+    )
+    
+    relative_speed = lead_vehicle['velocity']['speed'] - follow_vehicle['velocity']['speed']
+    
+    # Calculate desired speed based on lead vehicle, with minimum value
+    desired_speed = max(lead_vehicle['velocity']['speed'], 2.0)  # Increased minimum desired speed
+    
+    # Calculate acceleration using IDM
+    s_star = minimum_spacing + max(0, follow_vehicle['velocity']['speed'] * safe_time_headway + 
+                                 (follow_vehicle['velocity']['speed'] * relative_speed) / 
+                                 (2 * math.sqrt(max_acceleration * comfortable_deceleration)))
+    
+    # Calculate acceleration with safety checks
+    current_speed = max(follow_vehicle['velocity']['speed'], 0.1)  # Ensure non-zero current speed
+    
+    # Enhanced acceleration calculation
+    free_road_term = 1 - (current_speed / desired_speed)**delta
+    interaction_term = (s_star / max(distance, 0.1))**2
+    
+    # Add initial acceleration boost when far from lead vehicle
+    if distance > initial_distance_threshold:
+        free_road_term *= initial_acceleration_boost
+    
+    acceleration = max_acceleration * (free_road_term - interaction_term)
+    
+    # Convert acceleration to throttle/brake with enhanced control
+    if acceleration > 0:
+        # Ensure minimum throttle when following
+        throttle = max(0.4, min(1.0, acceleration / max_acceleration))
+        brake = 0.0
+    else:
+        throttle = 0.0
+        brake = min(1.0, -acceleration / comfortable_deceleration)
+    
+    # Calculate steering based on relative position
+    dx = lead_vehicle['transform']['location']['x'] - follow_vehicle['transform']['location']['x']
+    dy = lead_vehicle['transform']['location']['y'] - follow_vehicle['transform']['location']['y']
+    target_angle = math.atan2(dy, dx)
+    current_angle = follow_vehicle['transform']['rotation']['yaw'] * math.pi / 180.0
+    angle_diff = target_angle - current_angle
+    
+    # Normalize angle difference to [-pi, pi]
+    while angle_diff > math.pi:
+        angle_diff -= 2 * math.pi
+    while angle_diff < -math.pi:
+        angle_diff += 2 * math.pi
+    
+    # Enhanced steering calculation
+    distance_factor = min(1.0, distance / (2 * minimum_spacing))
+    speed_factor = min(1.0, current_speed / desired_speed)
+    
+    # Calculate steering with dynamic gain
+    steer = Kp_steer * angle_diff * distance_factor * speed_factor
+    steer = max(-0.4, min(0.4, steer))  # Limit steering to reasonable range
+    
+    # Emergency braking
+    if distance < emergency_braking_distance:
+        brake = 1.0
+        throttle = 0.0
+        steer *= 0.5  # Reduce steering during emergency braking
+    
+    # Force minimum throttle for movement
+    if distance > minimum_spacing and throttle < 0.4:
+        throttle = 0.4
+    
+    # Debug logging
+    print(f"Control calculation for vehicle {vehicle_id}:")
+    print(f"  Distance: {distance:.2f}m, Relative speed: {relative_speed:.2f}m/s")
+    print(f"  Desired speed: {desired_speed:.2f}m/s, Current speed: {follow_vehicle['velocity']['speed']:.2f}m/s")
+    print(f"  Acceleration: {acceleration:.2f}m/s²")
+    print(f"  Angle diff: {angle_diff*180/math.pi:.2f}°")
+    print(f"  Control outputs - Throttle: {throttle:.2f}, Steer: {steer:.2f}, Brake: {brake:.2f}")
+    
+    return {
+        'throttle': float(throttle),
+        'steer': float(steer),
+        'brake': float(brake)
+    }
 
 # MQTT callbacks
 def on_connect(client, userdata, flags, rc):
@@ -213,22 +132,65 @@ def on_connect(client, userdata, flags, rc):
         print(f"Failed to connect to MQTT broker with result code {rc}")
 
 def on_message(client, userdata, msg):
-    global lead_vehicle_data, follow_vehicle_data
+    global lead_vehicle_data, following_vehicles_data
     try:
         data = json.loads(msg.payload.decode())
-        print(f"Received vehicle data: {data}")
+        print(f"\nReceived vehicle data - Lead speed: {data['lead_vehicle']['velocity']['speed']:.2f} m/s")
         
         # Update vehicle data
         lead_vehicle_data = data['lead_vehicle']
-        follow_vehicle_data = data['follow_vehicle']
+        following_vehicles_data = data['following_vehicles']
         
-        # Calculate and send control commands
-        control_commands = calculate_control(lead_vehicle_data, follow_vehicle_data)
-        client.publish("carla/control/vehicle2", json.dumps(control_commands), qos=1)
-        print(f"Published control commands: {control_commands}")
+        # Calculate and send control commands for each following vehicle
+        for vehicle_id, follow_data in following_vehicles_data.items():
+            try:
+                # Get the vehicle in front (either lead vehicle or previous following vehicle)
+                front_vehicle_data = lead_vehicle_data
+                if int(vehicle_id) > 2:  # If not the first following vehicle
+                    prev_vehicle_id = str(int(vehicle_id) - 1)
+                    if prev_vehicle_id in following_vehicles_data:
+                        front_vehicle_data = following_vehicles_data[prev_vehicle_id]
+                
+                # Calculate control based on the vehicle in front
+                control_commands = calculate_control(front_vehicle_data, follow_data, vehicle_id)
+                
+                # Debug logging
+                distance = calculate_distance(
+                    front_vehicle_data['transform']['location']['x'],
+                    front_vehicle_data['transform']['location']['y'],
+                    follow_data['transform']['location']['x'],
+                    follow_data['transform']['location']['y']
+                )
+                print(f"Vehicle {vehicle_id} - Front speed: {front_vehicle_data['velocity']['speed']:.2f} m/s, "
+                      f"Follow speed: {follow_data['velocity']['speed']:.2f} m/s, "
+                      f"Distance: {distance:.2f} m")
+                
+                # Ensure minimum throttle for movement
+                if distance > minimum_spacing and control_commands['throttle'] < 0.4:
+                    control_commands['throttle'] = 0.4
+                
+                # Add timestamp to control commands
+                control_commands['timestamp'] = time.time()
+                
+                # Publish control commands
+                topic = f"carla/control/vehicle{vehicle_id}"
+                payload = json.dumps(control_commands)
+                print(f"Publishing to topic {topic}: {payload}")
+                client.publish(topic, payload, qos=1)
+                print(f"Published control commands for vehicle {vehicle_id} - "
+                      f"throttle: {control_commands['throttle']:.2f}, "
+                      f"steer: {control_commands['steer']:.2f}, "
+                      f"brake: {control_commands['brake']:.2f}")
+                
+            except Exception as e:
+                print(f"Error processing vehicle {vehicle_id}: {e}")
+                import traceback
+                traceback.print_exc()
         
     except Exception as e:
         print(f"Error processing message: {e}")
+        import traceback
+        traceback.print_exc()
 
 def on_disconnect(client, userdata, rc):
     print(f"Disconnected from MQTT broker with result code {rc}")
@@ -245,4 +207,18 @@ client.on_disconnect = on_disconnect
 # Connect to MQTT broker
 print("Connecting to MQTT broker...")
 client.connect(MQTT_BROKER, MQTT_PORT, 60)
-client.loop_forever() 
+client.loop_start()
+
+# Wait for MQTT connection to be established
+time.sleep(1)
+
+# Keep the script running
+print("Controller is running. Press Ctrl+C to exit.")
+try:
+    while True:
+        time.sleep(0.1)  # Small sleep to prevent high CPU usage
+except KeyboardInterrupt:
+    print("\nShutting down controller...")
+    client.loop_stop()
+    client.disconnect()
+    print("Controller stopped.") 
