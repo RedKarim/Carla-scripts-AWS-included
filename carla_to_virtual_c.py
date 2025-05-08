@@ -11,7 +11,7 @@ import paho.mqtt.client as mqtt
 import math
 
 # ========== MQTT SETUP ==========
-MQTT_BROKER = "localhost"  # Your Mac's IP address
+MQTT_BROKER = "192.168.0.127"  # Your Mac's IP address
 MQTT_PORT = 1883
 CLIENT_ID = "carla_client"
 
