@@ -15,7 +15,7 @@ NUM_FOLLOWING_VEHICLES = 3  # Number of following vehicles to spawn
 VEHICLE_SPACING = 15.0  # Distance between vehicles in meters
 
 # ========== MQTT SETUP ==========
-MQTT_BROKER = "192.168.0.127"  # Your Mac's IP address
+MQTT_BROKER = "192.168.0.127"  # IP address of the device running the MQTT broker
 MQTT_PORT = 1883
 CLIENT_ID = "carla_client"
 
@@ -32,9 +32,11 @@ def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
     if rc == 0:
         print("Successfully connected to MQTT broker")
-        # Subscribe to the control topic
-        client.subscribe("carla/control/vehicle2", qos=1)
-        print("Subscribed to topic: carla/control/vehicle2")
+        # Subscribe to control topics for all following vehicles
+        for vehicle_id in range(2, NUM_FOLLOWING_VEHICLES + 2):  # Vehicle IDs start from 2
+            topic = f"carla/control/vehicle{vehicle_id}"
+            client.subscribe(topic, qos=1)
+            print(f"Subscribed to topic: {topic}")
     else:
         print(f"Failed to connect to MQTT broker with result code {rc}")
 
@@ -44,18 +46,20 @@ def on_subscribe(client, userdata, mid, granted_qos):
 
 def on_message(client, userdata, msg):
     global last_receive_time, round_trip_start_time
-    print(f"Received message on topic: {msg.topic}")
-    print(f"Message payload: {msg.payload.decode()}")
+    print(f"\nReceived message on topic: {msg.topic}")
+    print(f"Raw message payload: {msg.payload.decode()}")
     try:
         control_data = json.loads(msg.payload.decode())
         print(f"Parsed control data: {control_data}")
         
         # Extract vehicle ID from topic
         vehicle_id = int(msg.topic.split('/')[-1].replace('vehicle', ''))
+        print(f"Processing control for vehicle {vehicle_id}")
         
         if vehicle_id not in following_controls:
-            following_controls[vehicle_id] = carla.VehicleControl()
-        
+            print(f"Warning: Received control for unknown vehicle {vehicle_id}")
+            return
+            
         # Calculate processing latency
         if 'timestamp' in control_data:
             last_receive_time = time.time()
@@ -71,18 +75,18 @@ def on_message(client, userdata, msg):
         target_steer = max(-1.0, min(1.0, float(control_data.get("steer", 0.0))))
         target_brake = max(0.0, min(1.0, float(control_data.get("brake", 0.0))))
         
-        # Smooth transitions with reduced smoothing factor for more responsive control
-        following_controls[vehicle_id].throttle = following_controls[vehicle_id].throttle + (target_throttle - following_controls[vehicle_id].throttle) * 0.7
-        following_controls[vehicle_id].steer = following_controls[vehicle_id].steer + (target_steer - following_controls[vehicle_id].steer) * 0.5
-        following_controls[vehicle_id].brake = following_controls[vehicle_id].brake + (target_brake - following_controls[vehicle_id].brake) * 0.7
+        print(f"Target control values - throttle: {target_throttle}, steer: {target_steer}, brake: {target_brake}")
+        
+        # Direct assignment of control values
+        following_controls[vehicle_id].throttle = target_throttle
+        following_controls[vehicle_id].steer = target_steer
+        following_controls[vehicle_id].brake = target_brake
         
         print(f"Applied control values for vehicle {vehicle_id} - throttle: {following_controls[vehicle_id].throttle}, steer: {following_controls[vehicle_id].steer}, brake: {following_controls[vehicle_id].brake}")
     except Exception as e:
         print(f"Error processing message: {e}")
-        # Reset to safe values on error
-        following_controls[vehicle_id].throttle = 0.0
-        following_controls[vehicle_id].steer = 0.0
-        following_controls[vehicle_id].brake = 1.0
+        import traceback
+        traceback.print_exc()
 
 def on_disconnect(client, userdata, rc):
     print(f"Disconnected from MQTT broker with result code {rc}")
@@ -104,6 +108,9 @@ mqtt_client.on_disconnect = on_disconnect
 print("Connecting to MQTT broker...")
 mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 mqtt_client.loop_start()
+
+# Wait for MQTT connection to be established
+time.sleep(1)
 
 # ========== CARLA SETUP ==========
 try:
@@ -145,7 +152,10 @@ for i in range(NUM_FOLLOWING_VEHICLES):
     vehicle_id = i + 2  # Vehicle IDs start from 2
     following_vehicles[vehicle_id] = world.spawn_actor(vehicle_bp, follow_spawn)
     following_controls[vehicle_id] = carla.VehicleControl()
-    print(f"Spawned following vehicle {vehicle_id}")
+    following_controls[vehicle_id].throttle = 0.0
+    following_controls[vehicle_id].steer = 0.0
+    following_controls[vehicle_id].brake = 0.0
+    print(f"Spawned following vehicle {vehicle_id} with initial control: throttle={following_controls[vehicle_id].throttle}, steer={following_controls[vehicle_id].steer}, brake={following_controls[vehicle_id].brake}")
     
     # Update previous spawn point for next vehicle
     prev_spawn = follow_spawn
@@ -269,7 +279,11 @@ def gps_callback(event):
             round_trip_start_time = time.time()
             
             # Publish data and measure latency
-            mqtt_client.publish("carla/gps", json.dumps(data), qos=1)
+            payload = json.dumps(data)
+            print(f"\nPublishing GPS data to topic carla/gps:")
+            print(f"Lead vehicle speed: {lead_speed:.2f} m/s")
+            print(f"Number of following vehicles: {len(following_vehicles)}")
+            mqtt_client.publish("carla/gps", payload, qos=1)
             publish_latency = (time.time() - round_trip_start_time) * 1000
             print(f"Publish latency: {publish_latency:.2f} ms")
             
@@ -277,8 +291,17 @@ def gps_callback(event):
             last_sent_time = now
         except Exception as e:
             print(f"Error publishing vehicle data: {e}")
+            import traceback
+            traceback.print_exc()
 
+# Set up GNSS sensor
+gnss_bp = bp_lib.find("sensor.other.gnss")
+gnss = world.spawn_actor(gnss_bp, carla.Transform(), attach_to=lead_vehicle)
+print("Spawned GNSS sensor")
+
+# Start GNSS sensor
 gnss.listen(lambda event: gps_callback(event))
+print("Started GNSS sensor")
 
 # Main loop
 clock = pygame.time.Clock()
@@ -330,8 +353,11 @@ while running:
 
     # Apply control to all following vehicles
     for vehicle_id, vehicle in following_vehicles.items():
-        vehicle.apply_control(following_controls[vehicle_id])
-        print(f"Applied control to vehicle {vehicle_id}: throttle={following_controls[vehicle_id].throttle}, steer={following_controls[vehicle_id].steer}, brake={following_controls[vehicle_id].brake}")
+        # Get the control values from following_controls
+        control = following_controls[vehicle_id]
+        # Apply the control values directly
+        vehicle.apply_control(control)
+        print(f"Applied control to vehicle {vehicle_id}: throttle={control.throttle}, steer={control.steer}, brake={control.brake}")
 
     if camera_surface:
         screen.blit(camera_surface, (0, 0))
