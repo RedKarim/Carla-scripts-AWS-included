@@ -45,9 +45,9 @@ def mpc_control(x0, leader_traj):
     return res.x[0]  # apply first control input
 
 # Simulate
-total_steps = 100
+total_steps = 10000
 x2 = 0
-v2 = 10
+v2 = 100
 states = []
 leader_traj_full = generate_leader_trajectory(total_steps + N)
 
