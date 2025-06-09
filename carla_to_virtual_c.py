@@ -15,7 +15,7 @@ NUM_FOLLOWING_VEHICLES = 3  # Number of following vehicles to spawn
 VEHICLE_SPACING = 15.0  # Distance between vehicles in meters
 
 # ========== MQTT SETUP ==========
-MQTT_BROKER = "192.168.0.127"  # IP address of the device running the MQTT broker
+MQTT_BROKER = "10.21.89.70"  # IP address of your Mac running the MQTT broker
 MQTT_PORT = 1883
 CLIENT_ID = "carla_client"
 
