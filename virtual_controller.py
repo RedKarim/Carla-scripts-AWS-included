@@ -4,7 +4,7 @@ import time
 import math
 
 # MQTT Configuration
-MQTT_BROKER = "192.168.0.127"  # IP address of the device running the MQTT broker
+MQTT_BROKER = "0.0.0.0"  # Listen on all interfaces
 MQTT_PORT = 1883
 CLIENT_ID = "virtual_controller"
 
