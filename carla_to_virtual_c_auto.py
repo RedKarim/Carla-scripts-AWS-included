@@ -6,9 +6,12 @@ import time
 import json
 import pygame
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 from pygame.locals import K_w, K_s, K_a, K_d, K_q, K_ESCAPE
 import paho.mqtt.client as mqtt
 import math
+from collections import deque
 
 # ========== CONFIGURATION ==========
 NUM_FOLLOWING_VEHICLES = 3  # Number of following vehicles to spawn
@@ -19,6 +22,121 @@ TRAFFIC_LIGHT_DISTANCE = 10.0  # Distance to start checking for traffic lights
 # Lead vehicle spawn configuration
 LEAD_VEHICLE_LOCATION = carla.Location(x=71.651, y=16.345, z=2.381)
 LEAD_VEHICLE_ROTATION = carla.Rotation(pitch=1.50, yaw=180.0, roll=-0.000)
+
+# Plot configuration
+PLOT_HISTORY = 100  # Number of data points to show in the plot
+TIME_WINDOW = 10.0  # Time window in seconds
+
+# Data storage for plotting
+class VehicleData:
+    def __init__(self):
+        self.times = deque(maxlen=PLOT_HISTORY)
+        self.velocities = deque(maxlen=PLOT_HISTORY)
+        self.accelerations = deque(maxlen=PLOT_HISTORY)
+        self.displacements = deque(maxlen=PLOT_HISTORY)
+        self.last_time = time.time()
+        self.last_velocity = 0.0
+        self.last_position = None
+        self.total_displacement = 0.0
+
+# Initialize data storage for all vehicles
+vehicle_data = {}
+
+# Set up the plot
+plt.ion()  # Enable interactive mode
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8))
+fig.suptitle('Vehicle Motion Data')
+
+# Initialize plots
+lines = {}
+for i in range(1, NUM_FOLLOWING_VEHICLES + 2):  # +2 because we start from vehicle 1
+    vehicle_data[i] = VehicleData()
+    lines[i] = {
+        'velocity': ax1.plot([], [], label=f'Vehicle {i}')[0],
+        'acceleration': ax2.plot([], [], label=f'Vehicle {i}')[0],
+        'displacement': ax3.plot([], [], label=f'Vehicle {i}')[0]
+    }
+
+# Configure subplots
+ax1.set_ylabel('Velocity (km/h)')
+ax1.set_title('Velocity over Time')
+ax1.grid(True)
+ax1.legend()
+
+ax2.set_ylabel('Acceleration (m/s²)')
+ax2.set_title('Acceleration over Time')
+ax2.grid(True)
+ax2.legend()
+
+ax3.set_xlabel('Time (s)')
+ax3.set_ylabel('Displacement (m)')
+ax3.set_title('Displacement over Time')
+ax3.grid(True)
+ax3.legend()
+
+# Adjust layout
+plt.tight_layout()
+
+def update_vehicle_data(vehicle_id, vehicle):
+    """Update the motion data for a vehicle."""
+    current_time = time.time()
+    data = vehicle_data[vehicle_id]
+    
+    # Get current velocity
+    velocity = vehicle.get_velocity()
+    current_velocity = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2) * 3.6  # Convert to km/h
+    
+    # Get current position
+    current_position = vehicle.get_location()
+    
+    # Calculate acceleration
+    if data.last_velocity is not None:
+        dt = current_time - data.last_time
+        if dt > 0:
+            acceleration = (current_velocity - data.last_velocity) / dt
+        else:
+            acceleration = 0
+    else:
+        acceleration = 0
+    
+    # Calculate displacement
+    if data.last_position is not None:
+        displacement = current_position.distance(data.last_position)
+        data.total_displacement += displacement
+    else:
+        displacement = 0
+    
+    # Update data
+    data.times.append(current_time)
+    data.velocities.append(current_velocity)
+    data.accelerations.append(acceleration)
+    data.displacements.append(data.total_displacement)
+    
+    # Update last values
+    data.last_time = current_time
+    data.last_velocity = current_velocity
+    data.last_position = current_position
+
+def update_plot():
+    """Update the plot with new data."""
+    for vehicle_id, data in vehicle_data.items():
+        if len(data.times) > 0:
+            # Convert times to relative time
+            relative_times = [t - data.times[0] for t in data.times]
+            
+            # Update line data
+            lines[vehicle_id]['velocity'].set_data(relative_times, data.velocities)
+            lines[vehicle_id]['acceleration'].set_data(relative_times, data.accelerations)
+            lines[vehicle_id]['displacement'].set_data(relative_times, data.displacements)
+    
+    # Adjust axis limits
+    for ax in [ax1, ax2, ax3]:
+        ax.relim()
+        ax.autoscale_view()
+    
+    # Redraw the plot
+    fig.canvas.draw()
+    fig.canvas.flush_events()
 
 # ========== MQTT SETUP ==========
 MQTT_BROKER = "10.21.89.70"  # IP address of your Mac running the MQTT broker
@@ -43,67 +161,59 @@ BRAKE_INCREMENT = 0.1
 STEER_INCREMENT = 0.05
 
 def get_traffic_light_state(vehicle, world):
-    """Get the state of the traffic light in front of the vehicle."""
-    vehicle_location = vehicle.get_location()
-    vehicle_transform = vehicle.get_transform()
-    
-    # Get all traffic lights in the world
-    traffic_lights = world.get_actors().filter('traffic.traffic_light')
-    
-    for traffic_light in traffic_lights:
-        # Get traffic light location
-        light_location = traffic_light.get_location()
-        
-        # Calculate distance to traffic light
-        distance = vehicle_location.distance(light_location)
-        
-        if distance < TRAFFIC_LIGHT_DISTANCE:
-            # Check if the traffic light is in front of the vehicle
-            light_vector = light_location - vehicle_location
-            vehicle_forward = vehicle_transform.get_forward_vector()
-            
-            # Calculate dot product to check if light is in front
-            dot_product = vehicle_forward.x * light_vector.x + vehicle_forward.y * light_vector.y
-            
-            if dot_product > 0:  # Light is in front
-                return traffic_light.get_state()
-    
+    """Get the state of the traffic light affecting the vehicle using CARLA's native methods."""
+    if vehicle.is_at_traffic_light():
+        traffic_light = vehicle.get_traffic_light()
+        if traffic_light:
+            return traffic_light.get_state()
     return None
 
 def update_lead_vehicle_control(vehicle, world):
     """Update the control of the lead vehicle based on traffic conditions."""
     global current_throttle, current_brake, current_steer
     
-    # Get current speed in km/h
-    velocity = vehicle.get_velocity()
-    current_speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2) * 3.6  # Convert to km/h
-    
-    # Check traffic light state
-    traffic_light_state = get_traffic_light_state(vehicle, world)
-    
-    # Control logic
-    if traffic_light_state == carla.TrafficLightState.Red:
-        # Stop at red light
-        current_throttle = 0.0
-        current_brake = min(current_brake + BRAKE_INCREMENT, 1.0)
-    else:
-        # Normal driving
-        if current_speed < TARGET_SPEED:
-            current_throttle = min(current_throttle + THROTTLE_INCREMENT, 0.7)
-            current_brake = max(current_brake - BRAKE_INCREMENT, 0.0)
-        else:
+    try:
+        # Get current speed in km/h
+        velocity = vehicle.get_velocity()
+        current_speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2) * 3.6  # Convert to km/h
+        
+        # Check traffic light state
+        traffic_light_state = get_traffic_light_state(vehicle, world)
+        
+        # Control logic
+        if traffic_light_state == carla.TrafficLightState.Red:
+            # Stop at red light
+            current_throttle = 0.0
+            current_brake = min(current_brake + BRAKE_INCREMENT, 1.0)
+            print("Red light detected - stopping")
+        elif traffic_light_state == carla.TrafficLightState.Yellow:
+            # Slow down for yellow light
             current_throttle = max(current_throttle - THROTTLE_INCREMENT, 0.0)
-            current_brake = 0.0
-    
-    # Keep steering straight
-    current_steer = 0.0
-    
-    # Apply control
-    control = carla.VehicleControl()
-    control.throttle = current_throttle
-    control.brake = current_brake
-    control.steer = current_steer
-    vehicle.apply_control(control)
+            current_brake = min(current_brake + BRAKE_INCREMENT * 0.5, 0.5)
+            print("Yellow light detected - slowing down")
+        else:
+            # Normal driving
+            if current_speed < TARGET_SPEED:
+                current_throttle = min(current_throttle + THROTTLE_INCREMENT, 0.7)
+                current_brake = max(current_brake - BRAKE_INCREMENT, 0.0)
+            else:
+                current_throttle = max(current_throttle - THROTTLE_INCREMENT, 0.0)
+                current_brake = 0.0
+        
+        # Keep steering straight
+        current_steer = 0.0
+        
+        # Apply control
+        control = carla.VehicleControl()
+        control.throttle = current_throttle
+        control.brake = current_brake
+        control.steer = current_steer
+        vehicle.apply_control(control)
+        
+    except Exception as e:
+        print(f"Error in update_lead_vehicle_control: {e}")
+        import traceback
+        traceback.print_exc()
 
 def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
@@ -406,12 +516,19 @@ while running:
 
     # Update lead vehicle control automatically
     update_lead_vehicle_control(lead_vehicle, world)
+    
+    # Update data for lead vehicle
+    update_vehicle_data(1, lead_vehicle)
 
     # Apply control to all following vehicles
     for vehicle_id, vehicle in following_vehicles.items():
         control = following_controls[vehicle_id]
         vehicle.apply_control(control)
-        print(f"Applied control to vehicle {vehicle_id}: throttle={control.throttle}, steer={control.steer}, brake={control.brake}")
+        # Update data for following vehicles
+        update_vehicle_data(vehicle_id, vehicle)
+
+    # Update the plot
+    update_plot()
 
     if camera_surface:
         screen.blit(camera_surface, (0, 0))
@@ -419,6 +536,7 @@ while running:
     clock.tick(30)
 
 # Cleanup
+plt.close('all')  # Close all matplotlib windows
 camera.stop()
 gnss.stop()
 camera.destroy()
