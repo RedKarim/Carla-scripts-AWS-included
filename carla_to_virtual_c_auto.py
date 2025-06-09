@@ -16,6 +16,10 @@ VEHICLE_SPACING = 5.0  # Distance between vehicles in meters
 TARGET_SPEED = 30.0  # Target speed in km/h
 TRAFFIC_LIGHT_DISTANCE = 10.0  # Distance to start checking for traffic lights
 
+# Lead vehicle spawn configuration
+LEAD_VEHICLE_LOCATION = carla.Location(x=71.651, y=16.345, z=2.381)
+LEAD_VEHICLE_ROTATION = carla.Rotation(pitch=1.50, yaw=180.0, roll=-0.000)
+
 # ========== MQTT SETUP ==========
 MQTT_BROKER = "10.21.89.70"  # IP address of your Mac running the MQTT broker
 MQTT_PORT = 1883
@@ -195,43 +199,57 @@ except IndexError:
 
 pygame.init()
 screen = pygame.display.set_mode((800, 600))
-pygame.display.set_caption("Car 1 Manual, Car 2 MQTT Control")
+pygame.display.set_caption("Autonomous Lead Vehicle with Following Vehicles")
 
 client = carla.Client("localhost", 2000)
 client.set_timeout(10.0)
 world = client.get_world()
 bp_lib = world.get_blueprint_library()
 
-# Spawn Car 1 (manual)
+# Get the map and spawn points
+carla_map = world.get_map()
+spawn_points = carla_map.get_spawn_points()
+
+# Spawn lead vehicle at specified location
 vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
-spawn_points = world.get_map().get_spawn_points()
-lead_spawn = spawn_points[0]
-lead_vehicle = world.spawn_actor(vehicle_bp, lead_spawn)
-print("Spawned lead vehicle")
+lead_transform = carla.Transform(LEAD_VEHICLE_LOCATION, LEAD_VEHICLE_ROTATION)
+lead_vehicle = world.spawn_actor(vehicle_bp, lead_transform)
+print(f"Spawned lead vehicle at location: ({LEAD_VEHICLE_LOCATION.x}, {LEAD_VEHICLE_LOCATION.y}, {LEAD_VEHICLE_LOCATION.z})")
+
+# Wait a moment to ensure the lead vehicle is properly spawned
+time.sleep(1)
 
 # Spawn following vehicles
-prev_spawn = lead_spawn
+prev_transform = lead_transform
 for i in range(NUM_FOLLOWING_VEHICLES):
-    # Calculate spawn position based on previous vehicle
-    follow_spawn = carla.Transform(
-        carla.Location(
-            x=prev_spawn.location.x - VEHICLE_SPACING * math.cos(math.radians(prev_spawn.rotation.yaw)),
-            y=prev_spawn.location.y - VEHICLE_SPACING * math.sin(math.radians(prev_spawn.rotation.yaw)),
-            z=prev_spawn.location.z
-        ),
-        prev_spawn.rotation
+    # Calculate spawn position behind the previous vehicle
+    # Use the vehicle's forward vector to determine the offset direction
+    forward_vector = prev_transform.get_forward_vector()
+    follow_location = carla.Location(
+        x=prev_transform.location.x - VEHICLE_SPACING * forward_vector.x,
+        y=prev_transform.location.y - VEHICLE_SPACING * forward_vector.y,
+        z=prev_transform.location.z
     )
+    follow_transform = carla.Transform(follow_location, prev_transform.rotation)
     
-    vehicle_id = i + 2  # Vehicle IDs start from 2
-    following_vehicles[vehicle_id] = world.spawn_actor(vehicle_bp, follow_spawn)
-    following_controls[vehicle_id] = carla.VehicleControl()
-    following_controls[vehicle_id].throttle = 0.0
-    following_controls[vehicle_id].steer = 0.0
-    following_controls[vehicle_id].brake = 0.0
-    print(f"Spawned following vehicle {vehicle_id} with initial control: throttle={following_controls[vehicle_id].throttle}, steer={following_controls[vehicle_id].steer}, brake={following_controls[vehicle_id].brake}")
-    
-    # Update previous spawn point for next vehicle
-    prev_spawn = follow_spawn
+    # Try to spawn the vehicle
+    try:
+        vehicle_id = i + 2  # Vehicle IDs start from 2
+        following_vehicles[vehicle_id] = world.spawn_actor(vehicle_bp, follow_transform)
+        following_controls[vehicle_id] = carla.VehicleControl()
+        following_controls[vehicle_id].throttle = 0.0
+        following_controls[vehicle_id].steer = 0.0
+        following_controls[vehicle_id].brake = 0.0
+        print(f"Spawned following vehicle {vehicle_id} at location: ({follow_location.x}, {follow_location.y})")
+        
+        # Update previous transform for next vehicle
+        prev_transform = follow_transform
+        
+        # Wait a moment to ensure the vehicle is properly spawned
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"Failed to spawn following vehicle {vehicle_id}: {e}")
+        continue
 
 # Camera on Car 1
 cam_bp = bp_lib.find("sensor.camera.rgb")
