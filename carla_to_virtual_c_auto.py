@@ -139,7 +139,7 @@ def update_plot():
     fig.canvas.flush_events()
 
 # ========== MQTT SETUP ==========
-MQTT_BROKER = "10.21.89.70"  # IP address of your Mac running the MQTT broker
+MQTT_BROKER = "10.21.89.100"  # IP address of your Mac running the MQTT broker
 MQTT_PORT = 1883
 CLIENT_ID = "carla_client"
 
