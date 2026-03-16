@@ -85,7 +85,11 @@ import carla
 from carla import ColorConverter as cc
 
 import argparse
+from mqtt_follower import MQTTVehiclePublisher, MQTTFollowerVehicle, LATENCY_MONITOR_AVAILABLE
 import collections
+
+if LATENCY_MONITOR_AVAILABLE:
+    from mqtt_latency_monitor import MQTTLatencyMonitor
 import datetime
 import logging
 import math
@@ -215,6 +219,12 @@ class World(object):
         self._actor_filter = args.filter
         self._actor_generation = args.generation
         self._gamma = args.gamma
+        self.mqtt_publisher = None
+        self.follower_vehicle = None
+        self.latency_monitor = None
+        if LATENCY_MONITOR_AVAILABLE:
+            self.latency_monitor = MQTTLatencyMonitor()
+            self.latency_monitor.start_monitor()
         self.restart()
         self.world.on_tick(hud.on_world_tick)
         self.recording_enabled = False
@@ -243,6 +253,11 @@ class World(object):
         # Keep same camera config if the camera manager exists.
         cam_index = self.camera_manager.index if self.camera_manager is not None else 0
         cam_pos_index = self.camera_manager.transform_index if self.camera_manager is not None else 0
+        
+        if self.follower_vehicle is not None:
+            self.follower_vehicle.destroy()
+            self.follower_vehicle = None
+        
         # Get a random blueprint.
         blueprint_list = get_actor_blueprints(self.world, self._actor_filter, self._actor_generation)
         if not blueprint_list:
@@ -294,6 +309,11 @@ class World(object):
         self.camera_manager.set_sensor(cam_index, notify=False)
         actor_type = get_actor_display_name(self.player)
         self.hud.notification(actor_type)
+        
+        if self.mqtt_publisher is None:
+            self.mqtt_publisher = MQTTVehiclePublisher(latency_monitor=self.latency_monitor)
+        if self.follower_vehicle is None:
+            self.follower_vehicle = MQTTFollowerVehicle(self.world, self.player, latency_monitor=self.latency_monitor)
 
         if self.sync:
             self.world.tick()
@@ -340,6 +360,10 @@ class World(object):
 
     def tick(self, clock):
         self.hud.tick(self, clock)
+        if self.mqtt_publisher is not None and self.player is not None:
+            self.mqtt_publisher.publish_state(self.player)
+        if self.follower_vehicle is not None:
+            self.follower_vehicle.update()
 
     def render(self, display):
         self.camera_manager.render(display)
@@ -363,6 +387,15 @@ class World(object):
             if sensor is not None:
                 sensor.stop()
                 sensor.destroy()
+        if self.follower_vehicle is not None:
+            self.follower_vehicle.destroy()
+            self.follower_vehicle = None
+        if self.mqtt_publisher is not None:
+            self.mqtt_publisher.destroy()
+            self.mqtt_publisher = None
+        if self.latency_monitor is not None:
+            self.latency_monitor.stop_monitor()
+            self.latency_monitor = None
         if self.player is not None:
             self.player.destroy()
 
@@ -1156,8 +1189,8 @@ class CameraManager(object):
 
     def set_sensor(self, index, notify=True, force_respawn=False):
         index = index % len(self.sensors)
-        needs_respawn = True if self.index is None else \
-            (force_respawn or (self.sensors[index][2] != self.sensors[self.index][2]))
+        needs_respawn = True if self.index is None else (
+            force_respawn or (self.sensors[index][2] != self.sensors[self.index][2]))
         if needs_respawn:
             if self.sensor is not None:
                 self.sensor.destroy()

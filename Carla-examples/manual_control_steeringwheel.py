@@ -49,6 +49,7 @@ import carla
 from carla import ColorConverter as cc
 
 import argparse
+from mqtt_follower import MQTTVehiclePublisher, MQTTFollowerVehicle
 import collections
 import datetime
 import logging
@@ -137,6 +138,8 @@ class World(object):
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
         self._actor_filter = actor_filter
+        self.mqtt_publisher = None
+        self.follower_vehicle = None
         self.restart()
         self.world.on_tick(hud.on_world_tick)
 
@@ -144,6 +147,11 @@ class World(object):
         # Keep same camera config if the camera manager exists.
         cam_index = self.camera_manager.index if self.camera_manager is not None else 0
         cam_pos_index = self.camera_manager.transform_index if self.camera_manager is not None else 0
+        
+        if self.follower_vehicle is not None:
+            self.follower_vehicle.destroy()
+            self.follower_vehicle = None
+        
         # Get a random blueprint.
         blueprint = random.choice(self.world.get_blueprint_library().filter(self._actor_filter))
         blueprint.set_attribute('role_name', 'hero')
@@ -171,6 +179,11 @@ class World(object):
         self.camera_manager.set_sensor(cam_index, notify=False)
         actor_type = get_actor_display_name(self.player)
         self.hud.notification(actor_type)
+        
+        if self.mqtt_publisher is None:
+            self.mqtt_publisher = MQTTVehiclePublisher()
+        if self.follower_vehicle is None:
+            self.follower_vehicle = MQTTFollowerVehicle(self.world, self.player)
 
     def next_weather(self, reverse=False):
         self._weather_index += -1 if reverse else 1
@@ -181,6 +194,10 @@ class World(object):
 
     def tick(self, clock):
         self.hud.tick(self, clock)
+        if self.mqtt_publisher is not None and self.player is not None:
+            self.mqtt_publisher.publish_state(self.player)
+        if self.follower_vehicle is not None:
+            self.follower_vehicle.update()
 
     def render(self, display):
         self.camera_manager.render(display)
@@ -196,6 +213,12 @@ class World(object):
             if sensor is not None:
                 sensor.stop()
                 sensor.destroy()
+        if self.follower_vehicle is not None:
+            self.follower_vehicle.destroy()
+            self.follower_vehicle = None
+        if self.mqtt_publisher is not None:
+            self.mqtt_publisher.destroy()
+            self.mqtt_publisher = None
         if self.player is not None:
             self.player.destroy()
 
