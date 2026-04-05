@@ -38,8 +38,13 @@ try:
     from mqtt_latency_monitor import MQTTLatencyMonitor
     LATENCY_MONITOR_AVAILABLE = True
 except ImportError:
-    LATENCY_MONITOR_AVAILABLE = False
-    MQTTLatencyMonitor = None
+    try:
+        from mqtt_latency_monitor_simple import SimpleMQTTLatencyMonitor as MQTTLatencyMonitor
+        LATENCY_MONITOR_AVAILABLE = True
+        print("簡易レイテンシモニターを使用します（CSVのみ）。")
+    except ImportError:
+        LATENCY_MONITOR_AVAILABLE = False
+        MQTTLatencyMonitor = None
 
 
 MQTT_BROKER = "localhost"
@@ -83,10 +88,11 @@ class MQTTVehiclePublisher:
             return
         
         try:
-            publish_start_time = time.time()
             transform = vehicle.get_transform()
             velocity = vehicle.get_velocity()
             control = vehicle.get_control()
+            
+            publish_timestamp = time.perf_counter()
             
             state = {
                 "location": {
@@ -113,17 +119,18 @@ class MQTTVehiclePublisher:
                     "reverse": control.reverse,
                     "gear": control.gear
                 },
-                "timestamp": publish_start_time
+                "publish_timestamp": publish_timestamp,
+                "system_time": time.time()
             }
             
             self.client.publish(self.topic, json.dumps(state), qos=1)
             
             if self.last_publish_time is not None and self.latency_monitor:
-                publish_interval = (publish_start_time - self.last_publish_time) * 1000
+                publish_interval = (publish_timestamp - self.last_publish_time) * 1000
                 if publish_interval > 0:
                     self.latency_monitor.record_latency(publish_interval, 'publish_interval')
             
-            self.last_publish_time = publish_start_time
+            self.last_publish_time = publish_timestamp
         except Exception as e:
             print(f"MQTT送信エラー: {e}")
 
@@ -209,12 +216,13 @@ class MQTTFollowerVehicle:
 
     def _on_message(self, client, userdata, msg):
         try:
-            receive_time = time.time()
+            receive_timestamp = time.perf_counter()
             state = json.loads(msg.payload.decode())
             
-            if self.latency_monitor and 'timestamp' in state:
-                latency_ms = (receive_time - state['timestamp']) * 1000
-                self.latency_monitor.record_latency(latency_ms, 'round_trip')
+            if self.latency_monitor and 'publish_timestamp' in state:
+                latency_ms = (receive_timestamp - state['publish_timestamp']) * 1000
+                if latency_ms > 0 and latency_ms < 1000:
+                    self.latency_monitor.record_latency(latency_ms, 'round_trip')
             
             with self.lock:
                 self.leader_state = state

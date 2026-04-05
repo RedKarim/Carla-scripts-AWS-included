@@ -49,8 +49,11 @@ import carla
 from carla import ColorConverter as cc
 
 import argparse
-from mqtt_follower import MQTTVehiclePublisher, MQTTFollowerVehicle
+from mqtt_follower import MQTTVehiclePublisher, MQTTFollowerVehicle, LATENCY_MONITOR_AVAILABLE
 import collections
+
+if LATENCY_MONITOR_AVAILABLE:
+    from mqtt_latency_monitor import MQTTLatencyMonitor
 import datetime
 import logging
 import math
@@ -140,6 +143,10 @@ class World(object):
         self._actor_filter = actor_filter
         self.mqtt_publisher = None
         self.follower_vehicle = None
+        self.latency_monitor = None
+        if LATENCY_MONITOR_AVAILABLE:
+            self.latency_monitor = MQTTLatencyMonitor()
+            self.latency_monitor.start_monitor()
         self.restart()
         self.world.on_tick(hud.on_world_tick)
 
@@ -181,9 +188,9 @@ class World(object):
         self.hud.notification(actor_type)
         
         if self.mqtt_publisher is None:
-            self.mqtt_publisher = MQTTVehiclePublisher()
+            self.mqtt_publisher = MQTTVehiclePublisher(latency_monitor=self.latency_monitor)
         if self.follower_vehicle is None:
-            self.follower_vehicle = MQTTFollowerVehicle(self.world, self.player)
+            self.follower_vehicle = MQTTFollowerVehicle(self.world, self.player, latency_monitor=self.latency_monitor)
 
     def next_weather(self, reverse=False):
         self._weather_index += -1 if reverse else 1
@@ -219,6 +226,9 @@ class World(object):
         if self.mqtt_publisher is not None:
             self.mqtt_publisher.destroy()
             self.mqtt_publisher = None
+        if self.latency_monitor is not None:
+            self.latency_monitor.stop_monitor()
+            self.latency_monitor = None
         if self.player is not None:
             self.player.destroy()
 
